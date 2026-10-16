@@ -1,0 +1,57 @@
+flowchart LR
+  subgraph punch_pkg["lab/punch：会合 + 打洞"]
+    punch_server["会合服务器<br/>runServer"]
+    punch_peer["打洞对等端<br/>runPeer"]
+    host_cand["host 候选收集<br/>hostCandidates"]
+    punch_sock["可切换 TTL 的 socket<br/>sock.send"]
+  end
+  set_ttl["设置 IP_TTL ×2<br/>setTTL"]
+  subgraph natprobe_pkg["lab/natprobe：NAT 画像"]
+    np_tests["画像测试 ×4<br/>runStun / runFilter / runTTL / runLife"]
+    np_server["配合服务端<br/>runServer"]
+    np_stun["最小 STUN 编解码<br/>query / bindingResponse"]
+    np_peer["手工打洞对等端<br/>runPeer"]
+  end
+  stunprobe["映射行为探测<br/>stunprobe"]
+  lab_sh["netns 实验室<br/>lab.sh"]
+  pcphone["PC ↔ 手机编排<br/>pcphone.sh"]
+  transport["传输层 ×3<br/>transport / fakeenc / xfer"]
+  stun_pub[公共 STUN 服务器]
+
+  punch_peer -->|"REG"| punch_server
+  punch_server -->|"PEER"| punch_peer
+  punch_peer -->|调用| host_cand
+  punch_peer -->|"PUNCH / ACK / PING / KA"| punch_sock
+  punch_sock -->|调用| set_ttl
+  np_tests -->|"FILT / TTLA·B·C / LIFE"| np_server
+  np_tests -->|query| np_stun
+  np_tests -->|"runTTL 调用"| set_ttl
+  np_server -->|bindingResponse| np_stun
+  np_peer -->|query| np_stun
+  np_peer -->|"低 TTL 预热"| set_ttl
+  np_stun -->|"STUN Binding"| stun_pub
+  stunprobe -->|"STUN Binding"| stun_pub
+  lab_sh -->|"ip netns exec … server"| punch_server
+  lab_sh -->|"ip netns exec … peer"| punch_peer
+  lab_sh -->|"run_xfer"| transport
+  pcphone -->|"natprobe stun"| np_tests
+  pcphone -->|"natprobe peer -file"| np_peer
+
+%% @src punch_server lab/punch/main.go func runServer
+%% @src punch_peer lab/punch/main.go func runPeer
+%% @src host_cand lab/punch/main.go func hostCandidates
+%% @src punch_sock lab/punch/main.go func (s *sock) send
+%% @src set_ttl lab/punch/ttl_unix.go func setTTL
+%% @src np_tests lab/natprobe/main.go func runStun
+%% @src np_server lab/natprobe/main.go func runServer
+%% @src np_stun lab/natprobe/stun.go func query
+%% @src np_peer lab/natprobe/peer.go func runPeer
+%% @src stunprobe lab/stunprobe/main.go func main()
+%% @src lab_sh lab/netns/lab.sh main() {
+%% @src pcphone lab/real/pcphone.sh case $1 in
+%% @src transport lab/xfer/main.go func main()
+%% @link punch_peer 20-flow-punch.mmd
+%% @link punch_sock 21-flow-symmetric.mmd
+%% @link np_tests 22-flow-nat-profile.mmd
+%% @link np_peer 23-flow-manual-punch.mmd
+%% @link lab_sh 30-netns-nat.mmd

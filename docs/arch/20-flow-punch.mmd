@@ -1,0 +1,42 @@
+flowchart TD
+  subgraph addr["① 寻址：知道往哪发"]
+    reg["每 200ms 注册<br/>REG room id hosts"]
+    srv_see["服务器记下包的源地址<br/>= 本方 NAT 的映射（srflx）"]
+    exchange["双向交换地址<br/>PEER id pub hosts"]
+    cands["组装候选<br/>pub + host + spray ±N"]
+  end
+  subgraph pass["② 放行：让对方的包像「回复」"]
+    punch_all["向所有候选发 PUNCH<br/>同一个 socket"]
+    my_nat["本方 NAT<br/>出包 → 建映射 + 过滤状态"]
+    peer_nat["对方 NAT<br/>入包 → 查映射、查过滤"]
+    recv_punch["收到 PUNCH → 回 ACK<br/>case PUNCH"]
+  end
+  subgraph keep["③ 时间：选定并维持"]
+    choose["选路：用包的真实源地址<br/>choose（prflx 学习）"]
+    rtt["测 RTT<br/>PING / PONG ×20"]
+    ka["保活：每 15s 发 KA<br/>防映射过期"]
+  end
+  fail["超时放弃<br/>现实中降级到 TURN"]
+
+  reg -->|UDP| srv_see
+  srv_see --> exchange
+  exchange -->|"PEER"| cands
+  cands --> punch_all
+  punch_all -->|UDP| my_nat
+  my_nat -->|"公网"| peer_nat
+  peer_nat -->|"放行"| recv_punch
+  recv_punch -->|"from 地址"| choose
+  choose --> rtt
+  rtt --> ka
+  punch_all -.->|"超过 -timeout"| fail
+
+%% @src reg lab/punch/main.go base.send(fmt.Sprintf("REG
+%% @src srv_see lab/punch/main.go m[id] = &member{pub: from.String()
+%% @src exchange lab/punch/main.go conn.WriteToUDP([]byte(fmt.Sprintf("PEER %s %s %s", oid
+%% @src cands lab/punch/main.go candidates = append(candidates, pub)
+%% @src punch_all lab/punch/main.go base.send("PUNCH "+*id, c, t)
+%% @src recv_punch lab/punch/main.go case "PUNCH":
+%% @src choose lab/punch/main.go choose := func(s *sock, a *net.UDPAddr, why string)
+%% @src rtt lab/punch/main.go s.send(fmt.Sprintf("PING %d"
+%% @src ka lab/punch/main.go s.send("KA", peer, 0)
+%% @src fail lab/punch/main.go log.Fatal("✘ 打洞超时

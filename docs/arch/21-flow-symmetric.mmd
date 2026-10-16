@@ -1,0 +1,51 @@
+flowchart TD
+  tick["每 200ms 一轮<br/>tick.C"]
+  role["信令按 NAT 画像分配角色<br/>lab.sh bday_role"]
+
+  subgraph order["时间：低 TTL 预热（只在本方 NAT 建状态）"]
+    warm_q{"前 -warm 轮且开了 -ttl？"}
+    low_ttl["本轮 PUNCH 用低 TTL<br/>t = -ttl"]
+    sock_send["加锁改 TTL 再发<br/>sock.send"]
+    set_ttl["setsockopt IP_TTL<br/>setTTL"]
+    mid_drop["中间路由器 TTL 减到 0 丢弃<br/>到不了对方 NAT"]
+  end
+
+  subgraph addr["寻址：对付对称 NAT（EDM）"]
+    spray["端口喷洒：pub ±N<br/>-spray"]
+    extras["对称端：额外开 N 个 socket<br/>-bday-sockets"]
+    extras_send["各向对端 pub 发 PUNCH<br/>在本方 NAT 开出 N 个随机端口"]
+    probes_gen["锥形端：随机挑 N 个目标端口<br/>-bday-probes"]
+    probes_send["限速发探测<br/>每轮 ≤128 个，预算发完即停"]
+    hit["某个探测正好命中某个映射<br/>readLoop(extra) 收到 PUNCH"]
+  end
+  choose_via["选路：经生日 socket<br/>choose"]
+
+  role -->|"-bday-sockets / -bday-probes"| extras
+  role -->|"-bday-probes"| probes_gen
+  tick --> warm_q
+  warm_q -->|是| low_ttl
+  low_ttl --> sock_send
+  sock_send --> set_ttl
+  set_ttl -.->|"包在路上"| mid_drop
+  tick -->|"预热结束后"| probes_send
+  probes_gen --> probes_send
+  tick --> extras_send
+  extras --> extras_send
+  extras_send -->|"开着预热时一直低 TTL"| sock_send
+  probes_send -->|"命中概率 ≈ 生日悖论"| hit
+  hit --> choose_via
+  spray -->|"追加到候选，经 20-flow-punch 发出"| tick
+
+%% @src tick lab/punch/main.go case <-tick.C:
+%% @src role lab/netns/lab.sh bday_role() {
+%% @src warm_q lab/punch/main.go if *ttl > 0 && round <= *warm
+%% @src low_ttl lab/punch/main.go t = *ttl
+%% @src sock_send lab/punch/main.go func (s *sock) send
+%% @src set_ttl lab/punch/ttl_unix.go func setTTL
+%% @src spray lab/punch/main.go for d := -*spray; d <= *spray; d++
+%% @src extras lab/punch/main.go extras = append(extras, &sock{UDPConn: c})
+%% @src extras_send lab/punch/main.go s.send("PUNCH "+*id, pub, *ttl)
+%% @src probes_gen lab/punch/main.go probes = append(probes, &net.UDPAddr{IP: pub.IP, Port: 1024 + p})
+%% @src probes_send lab/punch/main.go base.send("PUNCH "+*id, prb[next], 0)
+%% @src hit lab/punch/main.go go readLoop(s)
+%% @src choose_via lab/punch/main.go via = fmt.Sprintf(", 经生日 socket

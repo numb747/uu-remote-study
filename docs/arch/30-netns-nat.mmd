@@ -1,0 +1,50 @@
+flowchart TD
+  matrix["matrix：3×3 NAT 组合 × repeat<br/>输出成功矩阵"]
+  once["once：每次一个新宇宙<br/>unshare -Urnm"]
+  bday_role["按双方 NAT 类型分配生日角色<br/>bday_role"]
+  setup["拓扑：peer — nat — inet 路由器 — nat — peer<br/>setup / add_side"]
+  run_punch["inet 上起会合服务器，两端起 peer<br/>run_punch"]
+  punch_bin["punch server / peer"]
+  summarize["从日志取 via / RTT<br/>summarize"]
+
+  subgraph table["NAT 状态表：nat_rules 按类型写 nft 规则"]
+    nat_rules["nat_rules"]
+    nat_port["port：EIM + APDF<br/>masquerade（Linux 默认）"]
+    nat_sym["sym：EDM 对称<br/>masquerade fully-random"]
+    nat_full["full：EIM + EIF<br/>prerouting 全部 UDP dnat 给内网"]
+    fw["防火墙：WAN 来的 ct state new 丢弃<br/>丢在 conntrack 确认之前"]
+    nofw["--no-fw：先到的包被确认成 conntrack<br/>→ 本方映射冲突，换端口"]
+  end
+  conntrack[(Linux conntrack 表)]
+
+  matrix --> once
+  once --> bday_role
+  once -->|"经 inner"| setup
+  setup --> nat_rules
+  nat_rules --> nat_port
+  nat_rules --> nat_sym
+  nat_rules --> nat_full
+  nat_rules --> fw
+  nat_port -->|"读写映射"| conntrack
+  nat_sym -->|"读写映射"| conntrack
+  nat_full -->|"读写映射"| conntrack
+  fw -->|"不留记录"| conntrack
+  nofw -.->|"关掉"| fw
+  once -->|"经 inner"| run_punch
+  bday_role -->|"ARGS_A / ARGS_B"| run_punch
+  run_punch -->|"ip netns exec"| punch_bin
+  once --> summarize
+
+%% @src matrix lab/netns/lab.sh matrix)
+%% @src once lab/netns/lab.sh once() {
+%% @src bday_role lab/netns/lab.sh bday_role() {
+%% @src setup lab/netns/lab.sh add_side() {
+%% @src run_punch lab/netns/lab.sh run_punch() {
+%% @src punch_bin lab/punch/main.go func main()
+%% @src summarize lab/netns/lab.sh summarize() {
+%% @src nat_rules lab/netns/lab.sh nat_rules() {
+%% @src nat_port lab/netns/lab.sh port) $nft add rule ip nat post oifname wan masquerade ;;
+%% @src nat_sym lab/netns/lab.sh masquerade fully-random
+%% @src nat_full lab/netns/lab.sh udp dport 1024-65535 dnat
+%% @src fw lab/netns/lab.sh ct state new drop
+%% @src nofw lab/netns/lab.sh --no-fw) NO_FW=1

@@ -1,0 +1,31 @@
+flowchart LR
+  researcher[研究者]
+  netns_lab["netns NAT 实验室<br/>lab/netns/lab.sh"]
+  real_lab["真实网络编排<br/>lab/real/pcphone.sh"]
+  holepunch["打洞工具集 ×3<br/>punch / natprobe / stunprobe"]
+  transport["传输层实验 ×3<br/>transport / fakeenc / xfer"]
+  nft["Linux nftables + conntrack<br/>模拟出来的 NAT"]
+  real_nat["真实 NAT<br/>家宽路由 / 运营商 CGNAT"]
+  stun_pub[公共 STUN 服务器]
+  phone["安卓手机<br/>5G 网络，adb 调试"]
+
+  researcher -->|"运行 run / matrix"| netns_lab
+  researcher -->|运行| real_lab
+  netns_lab -->|"go build，ip netns exec"| holepunch
+  netns_lab -->|"运行 xfer"| transport
+  netns_lab -->|"写 NAT 规则"| nft
+  holepunch -->|"UDP 穿过（实验室）"| nft
+  real_lab -->|"运行 natprobe"| holepunch
+  real_lab -->|"adb push / adb shell"| phone
+  holepunch -->|"UDP 穿过（真实网络）"| real_nat
+  phone -->|"UDP 穿过"| real_nat
+  real_nat -->|"STUN Binding"| stun_pub
+
+%% @src netns_lab lab/netns/lab.sh main() {
+%% @src real_lab lab/real/pcphone.sh case $1 in
+%% @src holepunch lab/punch/main.go func main()
+%% @src transport lab/xfer/main.go func main()
+%% @link holepunch 10-modules.mmd
+%% @link netns_lab 30-netns-nat.mmd
+%% @link real_lab 23-flow-manual-punch.mmd
+%% @commit 6b8cbe2

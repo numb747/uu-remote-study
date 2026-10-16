@@ -1,0 +1,44 @@
+flowchart LR
+  subgraph tests["natprobe 客户端：逐项测 NAT"]
+    t_map["映射行为 EIM / EDM<br/>runStun：同一 socket 问多台 STUN"]
+    t_alloc["端口分配：保持 / 递增 / 随机<br/>runStun：依次新开 socket"]
+    t_filter["过滤：同 IP 换端口能否进来<br/>runFilter"]
+    t_ttl["预热跳数：TTL=k 能否开洞<br/>runTTL"]
+    t_life["映射寿命：静默多久失效<br/>runLife"]
+  end
+  stun_pub[公共 STUN 服务器]
+  subgraph srv["natprobe 服务端（主端口 + 备用端口）"]
+    srv_filt["FILT：主端口、备用端口各回一包"]
+    srv_ttl["TTLC：从备用端口反打 TTLP<br/>到 TTLA 记下的映射"]
+    srv_life["LIFE：延迟 ms 后再发 alive"]
+  end
+  subgraph knobs["结论落到 punch 的哪个旋钮"]
+    k_addr["寻址：端口预测 / 生日攻击<br/>-spray / -bday-*"]
+    k_pass["放行：双方同时发<br/>PUNCH 循环"]
+    k_ttl["顺序：预热 TTL<br/>-ttl"]
+    k_ka["过期：保活间隔<br/>KA 每 15s"]
+  end
+
+  t_map -->|"STUN Binding"| stun_pub
+  t_alloc -->|"STUN Binding"| stun_pub
+  t_filter -->|FILT| srv_filt
+  t_ttl -->|"TTLA → 低 TTL 的 TTLB → TTLC"| srv_ttl
+  t_life -->|"LIFE id ms"| srv_life
+  t_map -.->|"EDM 时才需要（人读输出）"| k_addr
+  t_alloc -.->|"递增→预测，随机→生日"| k_addr
+  t_filter -.->|"APDF → 必须同时发"| k_pass
+  t_ttl -.->|"取开洞的最小 TTL"| k_ttl
+  t_life -.->|"取寿命下限的一半"| k_ka
+
+%% @src t_map lab/natprobe/main.go // 1. 同一个 socket 问所有服务器
+%% @src t_alloc lab/natprobe/main.go // 2. 依次新开 socket
+%% @src t_filter lab/natprobe/main.go func runFilter
+%% @src t_ttl lab/natprobe/main.go func runTTL
+%% @src t_life lab/natprobe/main.go func runLife
+%% @src srv_filt lab/natprobe/main.go case "FILT":
+%% @src srv_ttl lab/natprobe/main.go alt.WriteToUDP([]byte("TTLP "+id), a)
+%% @src srv_life lab/natprobe/main.go time.AfterFunc(time.Duration(ms)
+%% @src k_addr lab/punch/main.go spray := fs.Int("spray"
+%% @src k_pass lab/punch/main.go base.send("PUNCH "+*id, c, t)
+%% @src k_ttl lab/punch/main.go ttl := fs.Int("ttl"
+%% @src k_ka lab/punch/main.go for range time.Tick(15 * time.Second)

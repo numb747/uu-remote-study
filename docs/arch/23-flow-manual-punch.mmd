@@ -1,0 +1,34 @@
+flowchart TD
+  setup["pcphone.sh setup<br/>PC 与手机同时起 natprobe peer"]
+  stun_q["各问一次 STUN，打印 MAPPED<br/>query"]
+  stun_pub[公共 STUN 服务器]
+  relay["脚本代替会合服务器<br/>把对方 MAPPED 写进 -file"]
+  read_file["每 100ms 读 -file 得目标"]
+  send_hi["每 interval 发 HI<br/>前 -warm 个用低 TTL"]
+  nats["双方 NAT<br/>家宽 EIM+APDF / 5G CGNAT"]
+  recv_hi["收到 HI → 原样回 HIACK"]
+  trigger["触发检查：首个 HI 进来就立刻回发<br/>-trigger"]
+  hiack["收到 HIACK = 双向打通<br/>算 RTT"]
+  summary["汇总：建连耗时、来源地址"]
+
+  setup -->|"PC() / PH()"| stun_q
+  stun_q -->|"STUN Binding"| stun_pub
+  setup -->|"give_pc / give_ph"| relay
+  relay -->|"写文件"| read_file
+  read_file --> send_hi
+  send_hi -->|UDP| nats
+  nats -->|"放行后"| recv_hi
+  recv_hi --> trigger
+  trigger -->|"HI t"| nats
+  nats -->|"HIACK"| hiack
+  hiack --> summary
+
+%% @src setup lab/real/pcphone.sh setup)
+%% @src stun_q lab/natprobe/peer.go fmt.Printf("%s MAPPED %s\n"
+%% @src relay lab/real/pcphone.sh give_pc() {
+%% @src read_file lab/natprobe/peer.go if b, err := os.ReadFile(*file)
+%% @src send_hi lab/natprobe/peer.go c.WriteToUDP(fmt.Appendf(nil, "HI %d %d", seq
+%% @src recv_hi lab/natprobe/peer.go c.WriteToUDP([]byte("HIACK "+f[1]+" "+f[2]), from)
+%% @src trigger lab/natprobe/peer.go if *trigger && len(rtts) == 0
+%% @src hiack lab/natprobe/peer.go 首个 HIACK 来自
+%% @src summary lab/natprobe/peer.go == 汇总：发 HI
