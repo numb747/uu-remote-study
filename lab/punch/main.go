@@ -17,7 +17,7 @@
 //
 // 协议 (纯文本 UDP):
 //
-//	peer→server  REG <room> <id> <host1,host2,...>
+//	peer→server  REG <room> <id> <host1,host2,...>   UNREG <room> <id>
 //	server→peer  PEER <id> <pubaddr> <host1,host2,...>
 //	peer↔peer    PUNCH <id> / ACK <id> / PING <unixnano> / PONG <unixnano> / MSG <text> / KA
 package main
@@ -78,6 +78,10 @@ func runServer(args []string) {
 			continue
 		}
 		f := strings.Fields(string(buf[:n]))
+		if len(f) == 3 && f[0] == "UNREG" { // 已经拿到对方地址，别再把自己推给后来者
+			delete(rooms[f[1]], f[2])
+			continue
+		}
 		if len(f) != 4 || f[0] != "REG" {
 			continue
 		}

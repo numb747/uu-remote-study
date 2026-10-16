@@ -5,11 +5,9 @@ import (
 	"crypto/ecdsa"
 	"crypto/elliptic"
 	"crypto/rand"
-	"crypto/sha256"
 	"crypto/tls"
 	"crypto/x509"
 	"encoding/binary"
-	"encoding/hex"
 	"errors"
 	"fmt"
 	"io"
@@ -106,6 +104,44 @@ func statsLine(c *quic.Conn) string {
 
 // ---------------- send ----------------
 
+// meter 统计已传字节，每 500ms 报一次进度。
+type meter struct {
+	n atomic.Uint64
+}
+
+func (m *meter) run(rep *reporter, dir string, total uint64, name string) (stop func()) {
+	done := make(chan struct{})
+	go func() {
+		t := time.NewTicker(500 * time.Millisecond)
+		defer t.Stop()
+		var last uint64
+		for {
+			select {
+			case <-done:
+				return
+			case <-t.C:
+				g := m.n.Load()
+				if g > 0 {
+					rep.progress(dir, g, total, float64(g-last)*8/0.5/1e6, name)
+				}
+				last = g
+			}
+		}
+	}()
+	return func() { close(done) }
+}
+
+type countingReader struct {
+	r io.Reader
+	m *meter
+}
+
+func (c countingReader) Read(p []byte) (int, error) {
+	n, err := c.r.Read(p)
+	c.m.n.Add(uint64(n))
+	return n, err
+}
+
 func send(o opts, path string) error {
 	f, err := os.Open(path)
 	if err != nil {
@@ -118,10 +154,10 @@ func send(o opts, path string) error {
 	}
 	size := uint64(fi.Size())
 	n := max(o.conns, 1)
-	log.Printf("发送 %s（%.1fMB），%d 条连接，房间 %s", fi.Name(), float64(size)/1e6, n, o.room)
-
-	sum := make(chan string, 1)
-	go func() { sum <- fileSHA256(path) }()
+	if size < 4<<20 {
+		n = 1 // 小文件多开连接只会多花打洞时间
+	}
+	o.rep.state(fmt.Sprintf("连接对方：%s（%.1fMB，%d 条连接）", fi.Name(), float64(size)/1e6, n))
 
 	chunk := (size + uint64(n) - 1) / uint64(n)
 	var (
@@ -129,12 +165,14 @@ func send(o opts, path string) error {
 		mu    sync.Mutex
 		first error
 		start time.Time // 第一条连接开始发数据的时刻
+		m     meter
 	)
+	stop := m.run(o.rep, "send", size, fi.Name())
 	for i := range n {
 		off := min(uint64(i)*chunk, size)
 		h := header{conns: uint16(n), idx: uint16(i), size: size, off: off, len: min(chunk, size-off), name: fi.Name()}
 		wg.Go(func() {
-			if err := sendPart(o, f, h, &mu, &start); err != nil {
+			if err := sendPart(o, f, h, &mu, &start, &m); err != nil {
 				mu.Lock()
 				first = cmp(first, err)
 				mu.Unlock()
@@ -142,13 +180,11 @@ func send(o opts, path string) error {
 		})
 	}
 	wg.Wait()
+	stop()
 	if first != nil {
 		return first
 	}
-	el := time.Since(start)
-	log.Printf("全部完成：%.1fMB 用时 %v，平均 %.1f Mbps（%.2f MB/s）", float64(size)/1e6, el.Round(time.Millisecond),
-		float64(size)*8/el.Seconds()/1e6, float64(size)/el.Seconds()/1e6)
-	log.Printf("sha256 %s", <-sum)
+	o.rep.done("send", size, time.Since(start), fi.Name())
 	return nil
 }
 
@@ -159,12 +195,15 @@ func cmp(a, b error) error {
 	return b
 }
 
-func sendPart(o opts, f *os.File, h header, mu *sync.Mutex, start *time.Time) error {
+func sendPart(o opts, f *os.File, h header, mu *sync.Mutex, start *time.Time, m *meter) error {
 	s, err := connect(o, roomOf(o, int(h.idx)), "send")
 	if err != nil {
 		return err
 	}
 	log.Printf("[%d] 打通 %s，用时 %v", h.idx, s.peer, s.took.Round(time.Millisecond))
+	if h.idx == 0 {
+		o.rep.state("已打通 " + s.peer.String())
+	}
 	tr := &quic.Transport{Conn: s.conn}
 	defer tr.Close()
 	ctx, cancel := context.WithCancel(context.Background())
@@ -191,7 +230,7 @@ func sendPart(o opts, f *os.File, h header, mu *sync.Mutex, start *time.Time) er
 	if _, err := str.Write(h.marshal()); err != nil {
 		return err
 	}
-	if _, err := io.Copy(str, io.NewSectionReader(f, int64(h.off), int64(h.len))); err != nil {
+	if _, err := io.Copy(str, countingReader{io.NewSectionReader(f, int64(h.off), int64(h.len)), m}); err != nil {
 		return fmt.Errorf("[%d] 发送: %w", h.idx, err)
 	}
 	str.Close()
@@ -208,41 +247,51 @@ func sendPart(o opts, f *os.File, h header, mu *sync.Mutex, start *time.Time) er
 
 // ---------------- recv ----------------
 
+// recv 收一个文件。第 0 条连接按 o.timeout 等对方（daemon 下一直等），其余连接在读到第 0 条的头之后再去接。
 func recv(o opts) error {
 	tc, err := selfSigned()
 	if err != nil {
 		return err
 	}
 	var (
-		got      atomic.Uint64
 		out      *os.File
 		outPath  string
 		size     uint64
+		name     string
 		openOnce sync.Once
 		openErr  error
 		first    time.Time
 		mu       sync.Mutex
+		m        meter
+		stop     = func() {}
 	)
 	var (
 		wg   sync.WaitGroup
 		errs = make(chan error, 256)
-		part func(i int) (header, error)
+		part func(i int) error
 	)
 	spawn := func(i int) {
 		wg.Go(func() {
-			if _, err := part(i); err != nil {
+			if err := part(i); err != nil {
 				errs <- err
 			}
 		})
 	}
 	// part 接一条连接：打洞 → QUIC → 读头 → 写到文件对应位置。第 0 条连接的头里有总连接数，读到后立即去接其余几条
 	// （发送端那几条正在会合服务器上等着）。
-	part = func(i int) (header, error) {
-		s, err := connect(o, roomOf(o, i), "recv")
+	part = func(i int) error {
+		po := o
+		if i > 0 {
+			po.timeout, po.regEvery = 30*time.Second, 500*time.Millisecond
+		}
+		s, err := connect(po, roomOf(o, i), "recv")
 		if err != nil {
-			return header{}, err
+			return err
 		}
 		log.Printf("[%d] 打通 %s，用时 %v", i, s.peer, s.took.Round(time.Millisecond))
+		if i == 0 {
+			o.rep.state("已打通 " + s.peer.String())
+		}
 		tr := &quic.Transport{Conn: s.conn}
 		defer tr.Close()
 		ctx, cancel := context.WithCancel(context.Background())
@@ -250,22 +299,22 @@ func recv(o opts) error {
 		go answerPunch(ctx, tr)
 		ln, err := tr.Listen(tc, quicConf())
 		if err != nil {
-			return header{}, err
+			return err
 		}
 		actx, acancel := context.WithTimeout(ctx, 15*time.Second)
 		defer acancel()
 		conn, err := ln.Accept(actx)
 		if err != nil {
-			return header{}, fmt.Errorf("[%d] 等 QUIC 连接: %w", i, err)
+			return fmt.Errorf("[%d] 等 QUIC 连接: %w", i, err)
 		}
 		defer conn.CloseWithError(0, "")
 		str, err := conn.AcceptStream(ctx)
 		if err != nil {
-			return header{}, err
+			return err
 		}
 		h, err := readHeader(str)
 		if err != nil {
-			return h, err
+			return err
 		}
 		if i == 0 {
 			for j := 1; j < int(h.conns); j++ {
@@ -273,14 +322,19 @@ func recv(o opts) error {
 			}
 		}
 		openOnce.Do(func() {
-			size = h.size
-			outPath = filepath.Join(o.out, h.name)
+			size, name = h.size, h.name
+			if openErr = os.MkdirAll(o.out, 0o755); openErr != nil {
+				return
+			}
+			outPath = uniquePath(o.out, h.name)
 			if out, openErr = os.Create(outPath); openErr == nil {
 				openErr = out.Truncate(int64(h.size))
 			}
+			o.rep.state(fmt.Sprintf("接收 %s（%.1fMB）", h.name, float64(h.size)/1e6))
+			stop = m.run(o.rep, "recv", size, name)
 		})
 		if openErr != nil {
-			return h, openErr
+			return openErr
 		}
 		mu.Lock()
 		if first.IsZero() {
@@ -294,74 +348,53 @@ func recv(o opts) error {
 			k, err := str.Read(buf)
 			if k > 0 {
 				if _, werr := w.Write(buf[:k]); werr != nil {
-					return h, werr
+					return werr
 				}
 				n += uint64(k)
-				got.Add(uint64(k))
+				m.n.Add(uint64(k))
 			}
 			if err != nil {
 				if err == io.EOF && n == h.len {
 					break
 				}
-				return h, fmt.Errorf("[%d] 接收: %w（收到 %d/%d）", i, err, n, h.len)
+				return fmt.Errorf("[%d] 接收: %w（收到 %d/%d）", i, err, n, h.len)
 			}
 		}
 		str.Write([]byte("OK"))
 		str.Close()
 		log.Printf("[%d] 收完 %.1fMB  %s", i, float64(n)/1e6, statsLine(conn))
 		time.Sleep(300 * time.Millisecond) // 让 OK 送达再关连接
-		return h, nil
+		return nil
 	}
-
-	// 进度：每秒一行
-	stop := make(chan struct{})
-	go func() {
-		t := time.NewTicker(time.Second)
-		defer t.Stop()
-		var last uint64
-		for {
-			select {
-			case <-stop:
-				return
-			case <-t.C:
-				g := got.Load()
-				if g == 0 {
-					continue
-				}
-				pct := 0.0
-				if size > 0 {
-					pct = float64(g) / float64(size) * 100
-				}
-				log.Printf("  %6.1fMB  %5.1f%%  当前 %.1f Mbps", float64(g)/1e6, pct, float64(g-last)*8/1e6)
-				last = g
-			}
-		}
-	}()
-	defer close(stop)
 
 	spawn(0)
 	wg.Wait()
+	stop()
 	close(errs)
 	if err := <-errs; err != nil {
+		if out != nil {
+			out.Close()
+			os.Remove(outPath) // 没收全的文件不留
+		}
 		return err
 	}
 	el := time.Since(first)
 	out.Close()
-	log.Printf("全部收完：%s  %.1fMB 用时 %v，平均 %.1f Mbps（%.2f MB/s）", outPath, float64(size)/1e6, el.Round(time.Millisecond),
-		float64(size)*8/el.Seconds()/1e6, float64(size)/el.Seconds()/1e6)
-	log.Printf("sha256 %s", fileSHA256(outPath))
+	o.rep.done("recv", size, el, outPath)
 	return nil
 }
 
-func fileSHA256(path string) string {
-	f, err := os.Open(path)
-	if err != nil {
-		return err.Error()
+// uniquePath 在 dir 里给 name 找一个不冲突的路径：a.mp4 → a (1).mp4 → a (2).mp4 …
+func uniquePath(dir, name string) string {
+	p := filepath.Join(dir, name)
+	ext := filepath.Ext(name)
+	base := name[:len(name)-len(ext)]
+	for i := 1; ; i++ {
+		if _, err := os.Stat(p); os.IsNotExist(err) {
+			return p
+		}
+		p = filepath.Join(dir, fmt.Sprintf("%s (%d)%s", base, i, ext))
 	}
-	defer f.Close()
-	h := sha256.New()
-	io.Copy(h, f)
-	return hex.EncodeToString(h.Sum(nil))
 }
 
 func selfSigned() (*tls.Config, error) {

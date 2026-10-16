@@ -1,0 +1,39 @@
+#!/bin/bash
+# P2P 直传 · 电脑端入口（install.sh 装到 ~/.local/bin/p2p-direct）
+#
+#   p2p-direct daemon          常驻接收（systemd 用户服务 p2p-direct.service 跑的就是它），存到 ~/Downloads/P2P直传
+#   p2p-direct send [文件...]  发到手机；不带文件就弹选择框（启动器图标、Dolphin 右键都走这里）
+#
+# 手机要开着「P2P 直传」App 才能收。进度和结果都走桌面通知。
+set -euo pipefail
+BIN=~/.local/bin/p2pcp
+ROOM=$(cat ~/.config/p2pcp/room)
+SERVER=${P2P_SERVER:-8.140.18.211:7000}
+
+# 开着 sing-box TUN 时，要绑物理网卡的地址才能打洞（否则走的是代理出口）：取 main 表默认路由那块网卡
+bind_ip() {
+	local dev
+	dev=$(ip -4 route show default table main | awk '{print $5; exit}')
+	ip -4 -o addr show dev "$dev" | awk '{print $4}' | cut -d/ -f1 | head -1
+}
+
+case ${1:-} in
+daemon)
+	mkdir -p ~/Downloads/P2P直传
+	exec "$BIN" daemon -server "$SERVER" -room "$ROOM.pc" -bind "$(bind_ip)" -o ~/Downloads/P2P直传 -notify
+	;;
+send)
+	shift
+	files=("$@")
+	if [ ${#files[@]} -eq 0 ]; then
+		mapfile -t files < <(zenity --file-selection --multiple --separator=$'\n' --title "发送到手机（P2P 直传）" 2>/dev/null) || exit 0
+	fi
+	[ ${#files[@]} -gt 0 ] || exit 0
+	notify-send -a "P2P 直传" -i p2p-direct "正在连接手机" "请确认手机上「P2P 直传」App 开着" || true
+	exec "$BIN" send -server "$SERVER" -room "$ROOM.phone" -bind "$(bind_ip)" -timeout 60s -notify "${files[@]}"
+	;;
+*)
+	sed -n '2,8p' "$0"
+	exit 2
+	;;
+esac

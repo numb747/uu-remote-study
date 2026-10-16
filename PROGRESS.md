@@ -65,7 +65,8 @@
 ### 0.5.4 打洞传文件 p2pcp（2026-10-16）
 - `lab/p2pcp`：会合（punch server，UDP 7000）→ 打洞 → quic-go 接管同一个 socket；`-conns N` 多连接分段并行，传完校验 sha256。
 - 296MB 测试视频从手机（5G）传到 PC：1 条连接 17.9Mbps（Cubic 被乱序误判的"丢包"拖住），4 条 45Mbps、8 条 47Mbps；手机直传服务器 48Mbps → 瓶颈就是 5G 上行，直连已跑到 95%。多连接的代价是 SRTT 涨到约 200ms。详见 [09](docs/09-打洞传文件.md)。
-- 会合服务器目前是手动起的临时进程（`timeout 7200`），没有做成常驻服务。
+- 会合服务器已做成常驻：99-server 上的 `uu-rendezvous.service`（UDP 7000）。
+- 封装成软件「P2P 直传」（`apps/`）：手机 App（不用 Gradle 打包；Go 核心伪装成 .so）+ 电脑端 systemd 用户服务、启动器和 Dolphin 右键。两个方向都已实测可用（docs/09 第 5 节）。房间密钥在 `~/.config/p2pcp/room`。
 
 ### 0.5.5 打洞心智模型讨论（2026-10-16，进行中）
 - 讨论式梳理概念（STUN / socket / 信令 / TURN / 协议层级 / STUN 报文），结论与待答问题见 [打洞心智模型-讨论记录](docs/打洞心智模型-讨论记录.md)。
