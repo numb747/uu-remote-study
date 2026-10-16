@@ -1,0 +1,8 @@
+# Go 编译产物
+/lab/stunprobe/stunprobe
+/lab/punch/punch
+*.exe
+
+# 抓包文件体积大、含真实 IP，只留目录
+/captures/*
+!/captures/.gitkeep
