@@ -17,7 +17,7 @@ import (
 // 这里由人或脚本代劳（-to 或 -file）。也用来测"陌生 IP 发来的包能不能进来"：一端只收不发，另一端往它的映射地址发。
 //
 //	HI <seq> <unixnano>     每 -interval 发一个
-//	HIACK <seq> <unixnano>  收到 HI 立即原样回，发送方据此算 RTT
+//	HIACK <seq> <unixnano> <回应方 unixnano>  收到 HI 立即回，发送方据此算 RTT 和两端时钟偏差
 func runPeer(args []string) {
 	fs := flag.NewFlagSet("peer", flag.ExitOnError)
 	stun := fs.String("stun", "", "STUN 服务器 IP:端口，用来打印本方映射地址")
@@ -42,7 +42,9 @@ func runPeer(args []string) {
 	}
 	defer c.Close()
 	start := time.Now()
-	ts := func() string { return fmt.Sprintf("%s +%5dms", time.Now().Format("15:04:05.000"), time.Since(start).Milliseconds()) }
+	ts := func() string {
+		return fmt.Sprintf("%s +%5dms", time.Now().Format("15:04:05.000"), time.Since(start).Milliseconds())
+	}
 
 	fmt.Printf("%s 本地 %s\n", ts(), c.LocalAddr())
 	if *stun != "" {
@@ -60,6 +62,8 @@ func runPeer(args []string) {
 		sources  = map[string]int{}
 		firstHI  time.Duration
 		firstAck time.Duration
+		bestRTT  time.Duration
+		offset   time.Duration // 对端时钟 - 本机时钟
 	)
 	go func() {
 		buf := make([]byte, 1500)
@@ -69,14 +73,14 @@ func runPeer(args []string) {
 				return
 			}
 			f := strings.Fields(string(buf[:n]))
-			if len(f) != 3 {
+			if len(f) < 3 {
 				continue
 			}
 			mu.Lock()
 			sources[from.String()]++
 			switch f[0] {
 			case "HI":
-				c.WriteToUDP([]byte("HIACK "+f[1]+" "+f[2]), from)
+				c.WriteToUDP(fmt.Appendf(nil, "HIACK %s %s %d", f[1], f[2], time.Now().UnixNano()), from)
 				if nHI++; nHI == 1 {
 					firstHI = time.Since(start)
 					fmt.Printf("%s ← 首个 HI 来自 %s\n", ts(), from)
@@ -88,7 +92,13 @@ func runPeer(args []string) {
 				}
 			case "HIACK":
 				ns, _ := strconv.ParseInt(f[2], 10, 64)
-				rtts = append(rtts, time.Since(time.Unix(0, ns)))
+				rtt := time.Since(time.Unix(0, ns))
+				rtts = append(rtts, rtt)
+				if len(f) >= 4 && (bestRTT == 0 || rtt < bestRTT) {
+					// NTP 的算法：假设去回程对称，对端时间应该对应我方 发送 + RTT/2；取 RTT 最小的样本误差最小
+					peer, _ := strconv.ParseInt(f[3], 10, 64)
+					bestRTT, offset = rtt, time.Duration(peer-ns)-rtt/2
+				}
 				if len(rtts) == 1 {
 					firstAck = time.Since(start)
 					fmt.Printf("%s ← 首个 HIACK 来自 %s，RTT %v —— 双向打通\n", ts(), from, rtts[0].Round(100*time.Microsecond))
@@ -154,5 +164,8 @@ func runPeer(args []string) {
 		slices.Sort(rtts)
 		q := func(p float64) time.Duration { return rtts[int(p*float64(len(rtts)-1))].Round(100 * time.Microsecond) }
 		fmt.Printf("  RTT min %v  p50 %v  p95 %v  max %v\n", rtts[0], q(0.5), q(0.95), rtts[len(rtts)-1].Round(100*time.Microsecond))
+	}
+	if bestRTT > 0 {
+		fmt.Printf("  OFFSET %v（对端时钟 - 本机时钟，误差 ≤ ±%v）\n", offset.Round(100*time.Microsecond), (bestRTT / 2).Round(100*time.Microsecond))
 	}
 }

@@ -17,7 +17,13 @@ func dialOwn(o opts) (frameSink, error) {
 	if err != nil {
 		return nil, err
 	}
-	conn, err := net.DialUDP("udp4", nil, raddr)
+	var laddr *net.UDPAddr
+	if o.local != "" {
+		if laddr, err = net.ResolveUDPAddr("udp4", o.local); err != nil {
+			return nil, err
+		}
+	}
+	conn, err := net.DialUDP("udp4", laddr, raddr)
 	if err != nil {
 		return nil, err
 	}

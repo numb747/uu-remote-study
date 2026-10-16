@@ -8,6 +8,7 @@
 #   pcphone.sh order pc|phone <秒>        一端先单独发 N 秒再让另一端开始，看会不会被换端口
 #   pcphone.sh setup "<peer 参数>" <轮数>  双方同时开始，统计建连耗时（如 "-trigger -interval 20ms"）
 #   pcphone.sh interval <间隔> <时长>       打通后按固定间隔互发，看 RTT 分布
+#   pcphone.sh xfer pc2ph|ph2pc <码率> [时长]  打洞后在直连路径上跑 xfer own 视频流（码率如 20000000）
 #
 # 环境变量：BIND（PC 物理网卡地址，开着 TUN 时必须）、STUN（公共 STUN 的 IP:端口）
 set -e
@@ -87,7 +88,32 @@ interval)
 	echo "interval=$2  PC:   $(grep -E 'RTT min|汇总' /tmp/i-pc.log | tr '\n' ' ')"
 	echo "interval=$2  手机: $(grep -E 'RTT min|汇总' /tmp/i-ph.log | tr '\n' ' ')"
 	;;
+xfer) # 先用固定端口打洞并测出时钟偏差，再让 xfer 复用这两个端口跑视频流
+	dir=$2 rate=$3 dur=${4:-10s}
+	PP=40000 CP=40001
+	reset_files
+	PH -port $PP -file $PHF -trigger -interval 20ms -dur 3s >/tmp/x-ph.log 2>&1 &
+	PC -port $CP -file $PCF -trigger -interval 20ms -dur 3s >/tmp/x-pc.log 2>&1 &
+	sleep 1.5; MP=$(mapped /tmp/x-ph.log); MC=$(mapped /tmp/x-pc.log)
+	give_pc $MP; give_ph $MC
+	wait
+	off=$(awk '/OFFSET/{sub(/（.*/, "", $2); print $2}' /tmp/x-pc.log) # 手机时钟 - PC 时钟
+	[ -n "$off" ] || { echo "打洞失败"; cat /tmp/x-pc.log; exit 1; }
+	neg=$([ "${off:0:1}" = - ] && echo "${off:1}" || echo "-$off")
+	echo "打洞完成：手机 $MP  PC $MC  时钟偏差(手机-PC) $off  方向 $dir  码率 $rate  时长 $dur"
+	if [ "$dir" = pc2ph ]; then
+		adb shell /data/local/tmp/xfer recv -mode own -listen :$PP -clock-offset $off >/tmp/x-recv.log 2>&1 &
+		sleep 1
+		/tmp/xfer send -mode own -to $MP -local $BIND:$CP -bitrate $rate -dur $dur >/tmp/x-send.log 2>&1
+	else
+		/tmp/xfer recv -mode own -listen $BIND:$CP -clock-offset $neg >/tmp/x-recv.log 2>&1 &
+		sleep 1
+		adb shell /data/local/tmp/xfer send -mode own -to $MC -local :$PP -bitrate $rate -dur $dur >/tmp/x-send.log 2>&1
+	fi
+	wait
+	cat /tmp/x-send.log /tmp/x-recv.log
+	;;
 *)
-	sed -n '2,13p' "$0"; exit 2
+	sed -n '2,14p' "$0"; exit 2
 	;;
 esac

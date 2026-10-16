@@ -16,6 +16,7 @@ type report struct {
 	lat      map[uint32]time.Duration // 帧 ID → 收齐延迟（没收齐的不在表里）
 	doneAt   map[uint32]time.Time     // 帧 ID → 收齐时刻
 	key      map[uint32]bool
+	offset   time.Duration // 接收端时钟 - 发送端时钟
 }
 
 func newReport(deadline time.Duration, fps int) *report {
@@ -25,8 +26,12 @@ func newReport(deadline time.Duration, fps int) *report {
 func (r *report) frame(id uint32, key bool, lat time.Duration) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
+	// own 的时间戳是 32 位微秒（约 71 分钟回绕）：接收端时钟比发送端慢时差值为负，会回绕成接近 2^32 微秒，先还原成负数再扣偏差
+	if wrap := time.Duration(1<<32) * time.Microsecond; lat > wrap/2 {
+		lat -= wrap
+	}
 	if _, dup := r.lat[id]; !dup {
-		r.lat[id] = lat
+		r.lat[id] = lat - r.offset
 		r.doneAt[id] = time.Now()
 	}
 	if key {

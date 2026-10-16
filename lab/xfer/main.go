@@ -10,7 +10,8 @@
 //	xfer recv -mode own -listen :9000
 //	xfer send -mode own -to 1.2.3.4:9000 -dur 20s -bitrate 20000000
 //
-// 帧延迟 = 接收端收齐时刻 - 发送端编码完成时刻，两端时钟需要同步（netns 实验室里是同一台机器，天然同步）。
+// 帧延迟 = 接收端收齐时刻 - 发送端编码完成时刻，两端时钟需要同步（netns 实验室里是同一台机器，天然同步；
+// 跨机器时用 -clock-offset 扣掉偏差）。
 package main
 
 import (
@@ -30,6 +31,8 @@ type opts struct {
 	dur      time.Duration
 	fps      int
 	bitrate  int
+	local    string        // 发送端本地地址：复用打洞开出来的映射
+	offset   time.Duration // 接收端时钟 - 发送端时钟，统计帧延迟时扣掉
 }
 
 func main() {
@@ -47,6 +50,8 @@ func main() {
 	fs.DurationVar(&o.dur, "dur", 20*time.Second, "发送端：发送时长")
 	fs.IntVar(&o.fps, "fps", 60, "帧率")
 	fs.IntVar(&o.bitrate, "bitrate", 20_000_000, "发送端：码率 bit/s")
+	fs.StringVar(&o.local, "local", "", "发送端：本地地址 IP:端口，用打洞时同一个端口才能复用 NAT 映射（目前只有 own 支持）")
+	fs.DurationVar(&o.offset, "clock-offset", 0, "接收端：本机时钟减发送端时钟（两端不是同一台机器时用 natprobe peer 测）")
 	fs.Parse(os.Args[2:])
 	log.SetFlags(log.Ltime | log.Lmicroseconds)
 
@@ -105,6 +110,7 @@ func send(o opts) error {
 
 func recv(o opts) error {
 	rep := newReport(o.deadline, o.fps)
+	rep.offset = o.offset
 	var total uint32
 	var err error
 	switch o.mode {
