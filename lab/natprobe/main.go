@@ -438,7 +438,10 @@ func runTTL(args []string) {
 	fmt.Println()
 	if firstOpen > 0 {
 		fmt.Printf("  → TTL ≥ %d 就能在本方 NAT 上开洞", firstOpen)
-		if firstReach > 0 {
+		switch {
+		case firstReach == 64:
+			fmt.Printf("；到服务器超过 %d 跳", *maxTTL)
+		case firstReach > 0:
 			fmt.Printf("；到服务器要 %d 跳", firstReach)
 		}
 		fmt.Println("\n    预热用的 TTL 取开洞的最小值即可；它必须小于到对方 NAT 的跳数，否则就不是\"预热\"而是普通打洞了")
