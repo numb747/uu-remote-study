@@ -4,12 +4,15 @@
 # 在里面以"假 root"身份搭网络；进程退出后所有命名空间自动消失，碰不到真实网络。
 #
 #   peerA 10.0.1.2 ── natA [10.0.1.1 | 203.0.113.1] ──┐
-#                                                     ├── inet br0 203.0.113.254（会合服务器）
-#   peerB 10.0.2.2 ── natB [10.0.2.1 | 203.0.113.2] ──┘
+#                                                     ├── inet 路由器（lo 上 192.0.2.1 跑会合服务器）
+#   peerB 10.0.2.2 ── natB [10.0.2.1 | 198.51.100.2] ─┘
+#
+# inet 是一跳路由器而不是网桥：两个 NAT 之间至少隔一跳，低 TTL 预热才有地方"死掉"。
+# 从 peer 出发：TTL=2 能出自家 NAT（减到 1），到 inet 时减到 0 被丢弃，到不了对方的 NAT。
 #
 # 用法:
 #   lab.sh run <natA> <natB> [选项]   跑一次 punch，输出是否打通、走哪条路、RTT
-#   lab.sh matrix [选项]              所有 NAT 组合各跑一次，输出成功矩阵
+#   lab.sh matrix [选项]              所有 NAT 组合各跑 --repeat 次，输出成功矩阵
 #   lab.sh shell <natA> <natB> [选项] 搭好后进交互 shell，自己 ip netns exec peerA ...
 #
 # NAT 类型:
@@ -23,6 +26,11 @@
 #   --spray N                 punch 的端口喷洒范围 ±N
 #   --timeout S               打洞超时秒数（默认 6）
 #   --no-fw                   NAT 不在 INPUT 丢弃 WAN 来的未请求包（复现 conntrack 冲突换端口的坑）
+#   --punch-args "<参数>"     传给两端 punch peer 的额外参数，如 "-ttl 2"
+#   --bday                    按双方 NAT 类型自动分配生日攻击角色：port↔sym 时对称端 -bday-sockets 256、
+#                             锥形端 -bday-probes 1024（相当于信令根据 NAT 画像做的决策）
+#   --bday-probes N           生日攻击锥形端的探测预算（默认 1024，隐含 --bday）
+#   --repeat N                matrix 每个组合跑几次（默认 1）
 #   -v                        打印完整日志
 set -euo pipefail
 
@@ -58,13 +66,15 @@ nat_rules() { # <ns> <内网主机 IP> <类型>
 	fi
 }
 
-add_side() { # <A|B> <序号> <NAT 类型> <netem 参数>
-	local s=$1 i=$2 type=$3 netem=$4 nat=nat$1 peer=peer$1
-	# WAN：natX.wan ↔ inet.vX（挂到 br0）
+add_side() { # <A|B> <序号> <WAN 网段前缀> <NAT 类型> <netem 参数>
+	local s=$1 i=$2 net=$3 type=$4 netem=$5 nat=nat$1 peer=peer$1
+	# WAN：natX.wan ($net.$i) ↔ inet.vX ($net.254)
 	ip link add wan netns "$nat" type veth peer name "v$s" netns inet
-	ip -n inet link set "v$s" master br0 up
-	ip -n "$nat" addr add "203.0.113.$i/24" dev wan
+	ip -n inet addr add "$net.254/24" dev "v$s"
+	ip -n inet link set "v$s" up
+	ip -n "$nat" addr add "$net.$i/24" dev wan
 	ip -n "$nat" link set wan up
+	ip -n "$nat" route add default via "$net.254"
 	# LAN：peerX.eth0 ↔ natX.lan
 	ip link add eth0 netns "$peer" type veth peer name lan netns "$nat"
 	ip -n "$nat" addr add "10.0.$i.1/24" dev lan
@@ -88,25 +98,24 @@ setup() { # <natA> <natB> <netemA> <netemB>
 		ip netns add "$ns"
 		ip -n "$ns" link set lo up
 	done
-	ip -n inet link add br0 type bridge
-	ip -n inet addr add 203.0.113.254/24 dev br0
-	ip -n inet link set br0 up
-	add_side A 1 "$1" "$3"
-	add_side B 2 "$2" "$4"
+	ip -n inet addr add 192.0.2.1/32 dev lo
+	ip netns exec inet sysctl -qw net.ipv4.ip_forward=1
+	add_side A 1 203.0.113 "$1" "$3"
+	add_side B 2 198.51.100 "$2" "$4"
 }
 
 # 跑一次 punch，输出一行: <A 结果>|<B 结果>|<RTT>
 run_punch() { # <bin> <logdir> <timeout> <spray>
 	local bin=$1 log=$2 t=$3 spray=$4
-	ip netns exec inet "$bin" server -listen 203.0.113.254:7000 >"$log/server.log" 2>&1 &
+	ip netns exec inet "$bin" server -listen 192.0.2.1:7000 >"$log/server.log" 2>&1 &
 	local srv=$!
 	sleep 0.2
-	ip netns exec peerA timeout $((t + 8)) "$bin" peer -server 203.0.113.254:7000 -id A \
-		-timeout "${t}s" -spray "$spray" </dev/null >"$log/A.log" 2>&1 &
+	ip netns exec peerA timeout $((t + 8)) "$bin" peer -server 192.0.2.1:7000 -id A \
+		-timeout "${t}s" -spray "$spray" $ARGS_A </dev/null >"$log/A.log" 2>&1 &
 	local pa=$!
 	sleep 0.1
-	ip netns exec peerB timeout $((t + 8)) "$bin" peer -server 203.0.113.254:7000 -id B \
-		-timeout "${t}s" -spray "$spray" </dev/null >"$log/B.log" 2>&1 &
+	ip netns exec peerB timeout $((t + 8)) "$bin" peer -server 192.0.2.1:7000 -id B \
+		-timeout "${t}s" -spray "$spray" $ARGS_B </dev/null >"$log/B.log" 2>&1 &
 	local pb=$!
 	wait $pa $pb || true
 	kill $srv 2>/dev/null || true
@@ -120,8 +129,8 @@ inner() {
 	run) run_punch "$bin" "$log" "$t" "$spray" ;;
 	shell)
 		echo "实验宇宙已就绪：natA=$ta natB=$tb。命名空间: inet natA natB peerA peerB"
-		echo "  会合服务器: ip netns exec inet $bin server -listen 203.0.113.254:7000"
-		echo "  对等端:     ip netns exec peerA $bin peer -server 203.0.113.254:7000 -id A"
+		echo "  会合服务器: ip netns exec inet $bin server -listen 192.0.2.1:7000"
+		echo "  对等端:     ip netns exec peerA $bin peer -server 192.0.2.1:7000 -id A"
 		echo "退出 shell 后整个宇宙自动销毁。"
 		PS1="[uulab $ta/$tb] \w\$ " bash --norc -i
 		;;
@@ -139,9 +148,19 @@ summarize() { # <logdir> → "A结果|B结果|RTT"
 	echo "${a:-✘}|${b:-✘}|${rtt:--}"
 }
 
+# 生日攻击角色：只有 port↔sym 需要（full 不用打，sym↔sym 两边都随机，生日攻击也救不了）
+bday_role() { # <本端类型> <对端类型>
+	[[ $BDAY == 1 ]] || return 0
+	[[ $1 == sym && $2 == port ]] && echo "-bday-sockets 256"
+	[[ $1 == port && $2 == sym ]] && echo "-bday-probes $BDAY_PROBES"
+	return 0
+}
+
 once() { # <natA> <natB> → 在新宇宙里跑一次，返回 summarize 结果
 	local log
 	log=$(mktemp -d "$WORK/run.XXXX")
+	# 通过环境变量传进宇宙
+	export ARGS_A="$PUNCH_ARGS $(bday_role "$1" "$2")" ARGS_B="$PUNCH_ARGS $(bday_role "$2" "$1")"
 	unshare -Urnm bash "$HERE/lab.sh" __inner run "$BIN" "$log" "$1" "$2" \
 		"$NETEM_A" "$NETEM_B" "$TIMEOUT" "$SPRAY" >"$log/lab.log" 2>&1 || true
 	if [[ $VERBOSE == 1 ]]; then
@@ -164,7 +183,7 @@ main() {
 		ta=$1 tb=$2
 		shift 2
 	fi
-	NETEM_A="" NETEM_B="" SPRAY=0 TIMEOUT=6 VERBOSE=0
+	NETEM_A="" NETEM_B="" SPRAY=0 TIMEOUT=6 VERBOSE=0 PUNCH_ARGS="" BDAY=0 BDAY_PROBES=1024 REPEAT=1
 	export NO_FW=0 # 通过环境变量传进 unshare 后的宇宙
 	while [[ $# -gt 0 ]]; do
 		case $1 in
@@ -173,6 +192,10 @@ main() {
 		--spray) SPRAY=$2; shift 2 ;;
 		--timeout) TIMEOUT=$2; shift 2 ;;
 		--no-fw) NO_FW=1; shift ;;
+		--punch-args) PUNCH_ARGS=$2; shift 2 ;;
+		--bday) BDAY=1; shift ;;
+		--bday-probes) BDAY=1 BDAY_PROBES=$2; shift 2 ;;
+		--repeat) REPEAT=$2; shift 2 ;;
 		-v) VERBOSE=1; shift ;;
 		*) die "未知选项: $1" ;;
 		esac
@@ -198,14 +221,19 @@ main() {
 		for a in "${TYPES[@]}"; do
 			local row="| **$a** |"
 			for b in "${TYPES[@]}"; do
-				IFS='|' read -r ra rb rtt < <(once "$a" "$b")
-				if [[ $ra != ✘ && $rb != ✘ ]]; then
-					row+=" ✅ $rtt |"
-				elif [[ $ra != ✘ || $rb != ✘ ]]; then
-					row+=" ⚠ 单边 |"
-				else
-					row+=" ❌ |"
-				fi
+				local ok=0 half=0
+				for ((r = 0; r < REPEAT; r++)); do
+					IFS='|' read -r ra rb rtt < <(once "$a" "$b")
+					if [[ $ra != ✘ && $rb != ✘ ]]; then
+						ok=$((ok + 1))
+					elif [[ $ra != ✘ || $rb != ✘ ]]; then
+						half=$((half + 1)) # 只有一边认为连上了
+					fi
+				done
+				local mark=❌ note=""
+				if ((ok == REPEAT)); then mark=✅; elif ((ok > 0)); then mark=⚠; fi
+				if ((half > 0)); then note=" (单边 $half)"; fi
+				row+=" $mark $ok/$REPEAT$note |"
 			done
 			echo "$row"
 		done

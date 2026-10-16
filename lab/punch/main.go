@@ -8,6 +8,13 @@
 //	  go run . peer -server VPS:7000 -room demo -id B
 //	对称 NAT 可加 -spray 50 尝试向预测端口附近喷洒。
 //
+// 两个增强手段（见 docs/06）:
+//
+//	-ttl 2            低 TTL 预热：前几轮 PUNCH 用小 TTL 发，只在本方 NAT 上建映射、到不了对方 NAT，
+//	                  避免对方 NAT 因先收到我们的包而记下冲突的 conntrack、给对方换端口。
+//	-bday-sockets 256 生日攻击·对称端：额外开 N 个 socket 各自向对端发包，在本方 NAT 上开出 N 个随机端口。
+//	-bday-probes 1024 生日攻击·锥形端：向对端公网 IP 的 N 个随机端口探测，命中其中任意一个即可。
+//
 // 协议 (纯文本 UDP):
 //
 //	peer→server  REG <room> <id> <host1,host2,...>
@@ -20,6 +27,7 @@ import (
 	"flag"
 	"fmt"
 	"log"
+	"math/rand/v2"
 	"net"
 	"os"
 	"sort"
@@ -96,6 +104,32 @@ func runServer(args []string) {
 
 // ---------------- peer ----------------
 
+const normalTTL = 64
+
+// sock 包装一个 UDP socket，让多个 goroutine 能安全地以不同 TTL 往里写。
+// TTL 是 socket 级选项："改 TTL → 发包 → 下次再改"必须互斥，
+// 否则接收循环回的 ACK 恰好落在预热窗口里，就会被带成低 TTL、到不了对方。
+type sock struct {
+	*net.UDPConn
+	mu  sync.Mutex
+	ttl int
+}
+
+func (s *sock) send(msg string, to *net.UDPAddr, ttl int) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if ttl == 0 {
+		ttl = normalTTL
+	}
+	if ttl != s.ttl {
+		if err := setTTL(s.UDPConn, ttl); err != nil {
+			log.Printf("设置 TTL=%d 失败: %v", ttl, err)
+		}
+		s.ttl = ttl
+	}
+	s.WriteToUDP([]byte(msg), to)
+}
+
 func runPeer(args []string) {
 	fs := flag.NewFlagSet("peer", flag.ExitOnError)
 	server := fs.String("server", "127.0.0.1:7000", "会合服务器地址")
@@ -104,44 +138,66 @@ func runPeer(args []string) {
 	port := fs.Int("port", 0, "本地 UDP 端口 (0=随机)")
 	spray := fs.Int("spray", 0, "对称 NAT: 向对端公网端口 ±N 范围喷洒")
 	timeout := fs.Duration("timeout", 15*time.Second, "打洞超时")
+	ttl := fs.Int("ttl", 0, "低 TTL 预热：前 -warm 轮 PUNCH 用这个 TTL 发 (0=关闭)")
+	warm := fs.Int("warm", 3, "预热轮数（每轮 200ms）")
+	bdaySockets := fs.Int("bday-sockets", 0, "生日攻击·对称端：额外开 N 个 socket")
+	bdayProbes := fs.Int("bday-probes", 0, "生日攻击·锥形端：向对端公网 IP 的 N 个随机端口探测")
 	fs.Parse(args)
 
 	conn, err := net.ListenUDP("udp4", &net.UDPAddr{Port: *port})
 	if err != nil {
 		log.Fatal(err)
 	}
+	base := &sock{UDPConn: conn}
 	srv := mustResolve(*server)
 	lan := hostCandidates(conn.LocalAddr().(*net.UDPAddr).Port)
 	log.Printf("local %s, registering to %s", lan, srv)
 
+	// 生日攻击·对称端：每个 socket 在本方 NAT 上占一个随机的公网端口
+	var extras []*sock
+	for i := 0; i < *bdaySockets; i++ {
+		c, err := net.ListenUDP("udp4", &net.UDPAddr{})
+		if err != nil {
+			log.Fatal(err)
+		}
+		extras = append(extras, &sock{UDPConn: c})
+	}
+
 	var (
 		mu         sync.Mutex
 		candidates []*net.UDPAddr
+		probes     []*net.UDPAddr
+		peerPub    *net.UDPAddr
+		selSock    *sock
 		selected   *net.UDPAddr
 		peerID     string
 		connected  = make(chan struct{})
 		once       sync.Once
 		pongs      = make(chan time.Duration, 64)
 	)
-	choose := func(a *net.UDPAddr, why string) {
+	choose := func(s *sock, a *net.UDPAddr, why string) {
 		once.Do(func() {
 			mu.Lock()
-			selected = a
+			selSock, selected = s, a
 			mu.Unlock()
 			kind := "公网 (打洞成功)"
 			if a.IP.IsPrivate() || a.IP.IsLoopback() {
 				kind = "局域网直连"
 			}
-			log.Printf("✔ connected to %s via %s [%s, %s]", peerID, a, kind, why)
+			via := ""
+			if s != base {
+				via = fmt.Sprintf(", 经生日 socket %s", s.LocalAddr())
+			}
+			log.Printf("✔ connected to %s via %s [%s, %s%s]", peerID, a, kind, why, via)
 			close(connected)
 		})
 	}
 
-	// 接收循环：一个 socket 同时处理服务器与对端的报文 —— 打洞必须复用同一个端口
-	go func() {
+	// 接收循环：服务器与对端的报文走同一个 socket —— 打洞必须复用同一个端口
+	readLoop := func(s *sock) {
 		buf := make([]byte, 1500)
 		for {
-			n, from, err := conn.ReadFromUDP(buf)
+			n, from, err := s.ReadFromUDP(buf)
 			if err != nil {
 				return
 			}
@@ -152,13 +208,14 @@ func runPeer(args []string) {
 			}
 			switch f[0] {
 			case "PEER":
-				if len(f) != 4 {
+				if len(f) != 4 || s != base {
 					continue
 				}
 				mu.Lock()
 				if peerID == "" {
 					peerID = f[1]
 					pub := mustResolve(f[2])
+					peerPub = pub
 					log.Printf("peer %s: pub=%s host=%s", f[1], pub, f[3])
 					candidates = append(candidates, pub)
 					for _, h := range strings.Split(f[3], ",") {
@@ -171,15 +228,19 @@ func runPeer(args []string) {
 							candidates = append(candidates, &net.UDPAddr{IP: pub.IP, Port: pub.Port + d})
 						}
 					}
+					// 生日攻击·锥形端：对称 NAT 的端口一般落在 1024~65535
+					for _, p := range rand.Perm(65536 - 1024)[:min(*bdayProbes, 65536-1024)] {
+						probes = append(probes, &net.UDPAddr{IP: pub.IP, Port: 1024 + p})
+					}
 				}
 				mu.Unlock()
 			case "PUNCH":
-				conn.WriteToUDP([]byte("ACK "+*id), from)
-				choose(from, "收到对方 PUNCH")
+				s.send("ACK "+*id, from, 0)
+				choose(s, from, "收到对方 PUNCH")
 			case "ACK":
-				choose(from, "收到 ACK")
+				choose(s, from, "收到 ACK")
 			case "PING":
-				conn.WriteToUDP([]byte("PONG "+f[1]), from)
+				s.send("PONG "+f[1], from, 0)
 			case "PONG":
 				if t, err := strconv.ParseInt(f[1], 10, 64); err == nil {
 					pongs <- time.Since(time.Unix(0, t))
@@ -188,11 +249,17 @@ func runPeer(args []string) {
 				fmt.Printf("\r<%s> %s\n> ", peerID, strings.TrimPrefix(msg, "MSG "))
 			}
 		}
-	}()
+	}
+	go readLoop(base)
+	for _, s := range extras {
+		go readLoop(s)
+	}
 
 	// 注册 + 打洞循环
+	const probesPerTick = 128 // 生日探测限速：每 200ms 最多 128 个，预算 1024 个约 1.6 秒发完
 	deadline := time.Now().Add(*timeout)
 	tick := time.NewTicker(200 * time.Millisecond)
+	round, next := 0, 0
 loop:
 	for {
 		select {
@@ -202,24 +269,50 @@ loop:
 			if time.Now().After(deadline) {
 				log.Fatal("✘ 打洞超时：双方可能都是对称 NAT 或 UDP 被封，现实中这里会降级到 TURN 中继")
 			}
-			conn.WriteToUDP([]byte(fmt.Sprintf("REG %s %s %s", *room, *id, lan)), srv)
+			base.send(fmt.Sprintf("REG %s %s %s", *room, *id, lan), srv, 0)
 			mu.Lock()
-			for _, c := range candidates {
-				conn.WriteToUDP([]byte("PUNCH "+*id), c)
-			}
+			cands, pub, prb := candidates, peerPub, probes
 			mu.Unlock()
+			if pub == nil {
+				continue
+			}
+			round++
+			t := 0
+			if *ttl > 0 && round <= *warm {
+				t = *ttl
+			}
+			for _, c := range cands {
+				base.send("PUNCH "+*id, c, t)
+			}
+			// 对称端的额外 socket 只需要把映射开出来并保持住；真正的连通靠锥形端的探测打进来，
+			// 所以开着预热时它们一直用低 TTL，免得在对方 NAT 上留下记录
+			for _, s := range extras {
+				s.send("PUNCH "+*id, pub, *ttl)
+			}
+			if round > *warm || *ttl == 0 {
+				// 探测数是总预算：发完就停。重复探测同一批端口不会提高命中率，只会多发包
+				for i := 0; i < probesPerTick && next < len(prb); i++ {
+					base.send("PUNCH "+*id, prb[next], 0)
+					next++
+				}
+			}
 		}
 	}
 	tick.Stop()
 
 	mu.Lock()
-	peer := selected
+	s, peer := selSock, selected
 	mu.Unlock()
+	for _, e := range extras {
+		if e != s {
+			e.Close()
+		}
+	}
 
 	// 测 RTT
 	var rtts []time.Duration
 	for i := 0; i < 20; i++ {
-		conn.WriteToUDP([]byte(fmt.Sprintf("PING %d", time.Now().UnixNano())), peer)
+		s.send(fmt.Sprintf("PING %d", time.Now().UnixNano()), peer, 0)
 		select {
 		case r := <-pongs:
 			rtts = append(rtts, r)
@@ -237,13 +330,13 @@ loop:
 	// NAT 映射会过期（常见 30s~5min），必须保活
 	go func() {
 		for range time.Tick(15 * time.Second) {
-			conn.WriteToUDP([]byte("KA"), peer)
+			s.send("KA", peer, 0)
 		}
 	}()
 	fmt.Print("聊天模式，输入文字回车发送 (Ctrl-C 退出)\n> ")
 	sc := bufio.NewScanner(os.Stdin)
 	for sc.Scan() {
-		conn.WriteToUDP([]byte("MSG "+sc.Text()), peer)
+		s.send("MSG "+sc.Text(), peer, 0)
 		fmt.Print("> ")
 	}
 }
