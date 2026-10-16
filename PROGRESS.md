@@ -48,7 +48,12 @@
 - 用 `unshare -Urnm` 实现，**不需要 sudo**（不要给 ip/nsenter 配 NOPASSWD，那样等于免密 root）。
 - 打洞矩阵和理论一致；还发现了 Linux NAT 的 conntrack 冲突坑，详见 [06](docs/06-netns实验记录.md)。
 - 低 TTL 预热、生日攻击已加进 `lab/punch`（2026-10-16）：除 sym↔sym 外全部打通，且不再依赖对方 NAT 有没有防火墙；生日攻击命中率实测与理论吻合。详见 06 第 3、4 节。
-- 下一步：进入 M4 传输层（包头、假编码器、quic-go 对照组）。
+
+### 0.5.2 M4 传输层 v1：已完成（2026-10-16）
+- `lab/fakeenc`（假编码器）、`lab/transport`（自研 v1：分片 + NACK + 截止时间丢弃）、`lab/xfer`（own/quic/tcp 对比工具）、`lab/netns/xfer-bench.sh`。
+- 1% 丢包下自研可播放 96%，QUIC/TCP 因基于丢包的拥塞控制吞吐不够而全部失败；3% 丢包时自研也垮在关键帧上。详见 [07](docs/07-传输层v1实验记录.md)。
+- 代码先放在 `lab/` 这个 Go 模块里（05 章第 5 节规划的 `pkg/`、`cmd/` 结构，等到 M1 写服务器时再整理）。
+- 下一步 M5：基于延迟的带宽估计 + 编码器码率闭环 → FEC → Pacer → PLI → NACK 乱序窗口。
 
 ### 0.6 换到有 IPv6 的新电脑后，第一步
 ```bash

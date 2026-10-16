@@ -14,6 +14,8 @@
 #   lab.sh run <natA> <natB> [选项]   跑一次 punch，输出是否打通、走哪条路、RTT
 #   lab.sh matrix [选项]              所有 NAT 组合各跑 --repeat 次，输出成功矩阵
 #   lab.sh shell <natA> <natB> [选项] 搭好后进交互 shell，自己 ip netns exec peerA ...
+#   lab.sh xfer <own|quic|tcp> [选项]  传输层测试：peerA（NAT 后）发帧流给 inet 上的接收端，
+#                                     弱网用 --netem-a 加在 A 的接入链路上，xfer 参数用 --xfer-args 传
 #
 # NAT 类型:
 #   full  全锥 (EIM + EIF)：保留端口 + 入方向 UDP 全部 DNAT 给内网主机
@@ -31,6 +33,7 @@
 #                             锥形端 -bday-probes 1024（相当于信令根据 NAT 画像做的决策）
 #   --bday-probes N           生日攻击锥形端的探测预算（默认 1024，隐含 --bday）
 #   --repeat N                matrix 每个组合跑几次（默认 1）
+#   --xfer-args "<参数>"      传给 xfer 两端的参数，如 "-dur 10s -bitrate 20000000 -deadline 100ms"
 #   -v                        打印完整日志
 set -euo pipefail
 
@@ -122,11 +125,24 @@ run_punch() { # <bin> <logdir> <timeout> <spray>
 	wait $srv 2>/dev/null || true
 }
 
+# 传输层测试：接收端在 inet（相当于公网服务器），发送端在 peerA 的 NAT 后面
+run_xfer() { # <logdir>
+	local log=$1
+	ip netns exec inet "$XFER_BIN" recv -mode "$XFER_MODE" -listen 192.0.2.1:9000 $XFER_ARGS >"$log/recv.log" 2>&1 &
+	local rp=$!
+	# 先 ping 一次把沿途 ARP 解析好：新建的网络里 ARP 等待队列很小，关键帧一次涌出几百个包会被它丢掉
+	ip netns exec peerA ping -c 1 -W 1 192.0.2.1 >/dev/null 2>&1 || true
+	sleep 0.3
+	ip netns exec peerA "$XFER_BIN" send -mode "$XFER_MODE" -to 192.0.2.1:9000 $XFER_ARGS >"$log/send.log" 2>&1 || true
+	wait $rp || true
+}
+
 inner() {
 	local mode=$1 bin=$2 log=$3 ta=$4 tb=$5 netem_a=$6 netem_b=$7 t=$8 spray=$9
 	setup "$ta" "$tb" "$netem_a" "$netem_b"
 	case $mode in
 	run) run_punch "$bin" "$log" "$t" "$spray" ;;
+	xfer) run_xfer "$log" ;;
 	shell)
 		echo "实验宇宙已就绪：natA=$ta natB=$tb。命名空间: inet natA natB peerA peerB"
 		echo "  会合服务器: ip netns exec inet $bin server -listen 192.0.2.1:7000"
@@ -178,12 +194,18 @@ main() {
 	local cmd=${1:-} ta="" tb=""
 	[[ -n $cmd ]] || die "用法见文件头注释"
 	shift
-	if [[ $cmd == run || $cmd == shell ]]; then
+	if [[ $cmd == xfer ]]; then
+		[[ $# -ge 1 ]] || die "xfer 需要传输方式: own | quic | tcp"
+		export XFER_MODE=$1
+		ta=port tb=port
+		shift
+	elif [[ $cmd == run || $cmd == shell ]]; then
 		[[ $# -ge 2 ]] || die "$cmd 需要两个 NAT 类型"
 		ta=$1 tb=$2
 		shift 2
 	fi
 	NETEM_A="" NETEM_B="" SPRAY=0 TIMEOUT=6 VERBOSE=0 PUNCH_ARGS="" BDAY=0 BDAY_PROBES=1024 REPEAT=1
+	export XFER_ARGS=""
 	export NO_FW=0 # 通过环境变量传进 unshare 后的宇宙
 	while [[ $# -gt 0 ]]; do
 		case $1 in
@@ -196,6 +218,7 @@ main() {
 		--bday) BDAY=1; shift ;;
 		--bday-probes) BDAY=1 BDAY_PROBES=$2; shift 2 ;;
 		--repeat) REPEAT=$2; shift 2 ;;
+		--xfer-args) XFER_ARGS=$2; shift 2 ;;
 		-v) VERBOSE=1; shift ;;
 		*) die "未知选项: $1" ;;
 		esac
@@ -204,12 +227,21 @@ main() {
 	WORK=$(mktemp -d /tmp/uulab.XXXX)
 	trap 'rm -rf "$WORK"' EXIT
 	BIN=$WORK/punch
-	(cd "$HERE/.." && CGO_ENABLED=0 go build -o "$BIN" ./punch)
+	export XFER_BIN=$WORK/xfer
+	(cd "$HERE/.." && CGO_ENABLED=0 go build -o "$BIN" ./punch && CGO_ENABLED=0 go build -o "$XFER_BIN" ./xfer)
 
 	case $cmd in
 	run)
 		IFS='|' read -r a b rtt < <(once "$ta" "$tb")
 		echo "natA=$ta natB=$tb  A→$a  B→$b  RTT p50=$rtt"
+		;;
+	xfer)
+		local log
+		log=$(mktemp -d "$WORK/xfer.XXXX")
+		unshare -Urnm bash "$HERE/lab.sh" __inner xfer "$BIN" "$log" "$ta" "$tb" \
+			"$NETEM_A" "$NETEM_B" "$TIMEOUT" "$SPRAY" >"$log/lab.log" 2>&1 || true
+		[[ $VERBOSE == 1 ]] && cat "$log/lab.log" >&2
+		cat "$log/send.log" "$log/recv.log"
 		;;
 	shell)
 		unshare -Urnm bash "$HERE/lab.sh" __inner shell "$BIN" "$WORK" "$ta" "$tb" \
