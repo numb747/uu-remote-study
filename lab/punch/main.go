@@ -18,7 +18,7 @@
 // 协议 (纯文本 UDP):
 //
 //	peer→server  REG <room> <id> <host1,host2,...>   UNREG <room> <id>
-//	server→peer  PEER <id> <pubaddr> <host1,host2,...>
+//	server→peer  PEER <id> <pubaddr> <host1,host2,...>   YOU <pubaddr>（对每个 REG 的回执）
 //	peer↔peer    PUNCH <id> / ACK <id> / PING <unixnano> / PONG <unixnano> / MSG <text> / KA
 package main
 
@@ -86,6 +86,8 @@ func runServer(args []string) {
 			continue
 		}
 		room, id, lan := f[1], f[2], f[3]
+		// 告诉对方它的公网映射：客户端据此发现"分到的端口进不来"（比如运营商 CGNAT 分了被拦截的低端口，docs/09）
+		conn.WriteToUDP([]byte("YOU "+from.String()), from)
 		if rooms[room] == nil {
 			rooms[room] = map[string]*member{}
 		}

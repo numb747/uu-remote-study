@@ -19,7 +19,7 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/quic-go/quic-go"
+	"github.com/apernet/quic-go"
 )
 
 const alpn = "p2pcp"
@@ -154,10 +154,10 @@ func send(o opts, path string) error {
 	}
 	size := uint64(fi.Size())
 	n := max(o.conns, 1)
-	if size < 4<<20 {
+	if size < 1<<20 {
 		n = 1 // 小文件多开连接只会多花打洞时间
 	}
-	o.rep.state(fmt.Sprintf("连接对方：%s（%.1fMB，%d 条连接）", fi.Name(), float64(size)/1e6, n))
+	o.rep.state(fmt.Sprintf("连接对方：%s（%.1fMB，%d 条连接，拥塞控制 %s）", fi.Name(), float64(size)/1e6, n, o.cc))
 
 	chunk := (size + uint64(n) - 1) / uint64(n)
 	var (
@@ -217,6 +217,9 @@ func sendPart(o opts, f *os.File, h header, mu *sync.Mutex, start *time.Time, m 
 		return fmt.Errorf("[%d] QUIC 握手: %w", h.idx, err)
 	}
 	defer conn.CloseWithError(0, "")
+	if err := applyCC(conn, o.cc); err != nil {
+		return err
+	}
 	str, err := conn.OpenStreamSync(ctx)
 	if err != nil {
 		return err

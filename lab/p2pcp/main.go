@@ -15,6 +15,7 @@
 package main
 
 import (
+	"errors"
 	"flag"
 	"fmt"
 	"log"
@@ -37,6 +38,7 @@ type opts struct {
 	public   string
 	lan      string
 	conns    int
+	cc       string
 	out      string
 	timeout  time.Duration // 等对方的超时，0 = 一直等（daemon）
 	regEvery time.Duration // 注册间隔
@@ -59,6 +61,7 @@ func main() {
 	fs.StringVar(&o.public, "public", "", "本机自己的公网 IP，作为额外候选（1:1 NAT 的云服务器用：会合服务器在本机时看到的是 127.0.0.1）")
 	fs.StringVar(&o.lan, "lan", "", "本机内网 IP 列表（逗号分隔），代替自动探测（Android 11+ 的 App 里 Go 读不到网卡列表）")
 	fs.IntVar(&o.conns, "conns", 4, "发送端：并行连接数（每条各打一个洞）")
+	fs.StringVar(&o.cc, "cc", "cubic", "发送端：拥塞控制 cubic | bbr | brutal:45M（见 cc.go）")
 	fs.StringVar(&o.out, "o", ".", "接收端：保存目录")
 	fs.DurationVar(&o.timeout, "timeout", 60*time.Second, "等对方的超时（daemon 模式下无效）")
 	progress := fs.Bool("progress", false, "在 stdout 输出机器可读的进度行")
@@ -109,12 +112,45 @@ func usage() {
 type session struct {
 	conn *net.UDPConn
 	peer *net.UDPAddr
-	took time.Duration // 从拿到对方地址到打通
+	took time.Duration // 从开始注册到打通（含重试）
 }
 
-// connect 在 room 里注册为 id，拿到对方候选地址后打洞。对方的候选 = 服务器看到的公网映射 + 对方自报的内网地址，
-// 哪个先回应就用哪个（同一个局域网时内网地址 RTT 小，自然先回来）。
+// connect 在 room 里注册为 id，拿到对方候选地址后打洞；一轮打不通就换新端口重来。
+//
+// 偶发的"双方地址都对、两个方向却一个包都过不去"（docs/09 第 6 节）：某一侧 NAT 因为对方的包先到而留下了冲突状态，
+// 给我们出去的包换了端口（docs/06 的 conntrack 冲突），这一对端口就废了。换一对新端口，冲突状态就不在了。
+// 双方的单轮超时一样长、又几乎同时开始，所以会一起超时、一起重新注册，由会合服务器重新配对。
 func connect(o opts, room, id string) (*session, error) {
+	const attempts = 6
+	start := time.Now()
+	var err error
+	for i := range attempts {
+		var s *session
+		if s, err = connectOnce(o, room, id); err == nil {
+			s.took = time.Since(start)
+			if i > 0 {
+				log.Printf("%s: 第 %d 轮才打通", room, i+1)
+			}
+			return s, nil
+		}
+		if !errors.Is(err, errPunchTimeout) && !errors.Is(err, errBadPort) {
+			return nil, err // 等不到对方之类的错误，重来也没用
+		}
+		log.Printf("%s: 第 %d 轮失败（%v），换端口重来", room, i+1, err)
+	}
+	return nil, err
+}
+
+var (
+	errPunchTimeout = errors.New("打洞超时")
+	// errBadPort：会合服务器的回执没收到，或者收到了但映射端口 < 1024。电信 CGNAT 端口不够时会分 1~437 的低端口，
+	// 这些端口上外面的包进不来（连会合服务器的回包都收不到），整个 socket 只能扔掉
+	errBadPort = errors.New("这个端口外面进不来")
+)
+
+// connectOnce 用一个新 socket 注册、拿对方候选、打洞。对方的候选 = 服务器看到的公网映射 + 对方自报的内网地址，
+// 哪个先回应就用哪个（同一个局域网时内网地址 RTT 小，自然先回来）。
+func connectOnce(o opts, room, id string) (*session, error) {
 	var ip net.IP
 	if o.bind != "" {
 		ip = net.ParseIP(o.bind)
@@ -146,8 +182,16 @@ func connect(o opts, room, id string) (*session, error) {
 	var peerCands []*net.UDPAddr
 	buf := make([]byte, 1500)
 	start := time.Now()
-	var lastReg time.Time
+	var (
+		lastReg time.Time
+		mapped  *net.UDPAddr // 会合服务器回执里的本方公网映射
+	)
 	for peerCands == nil {
+		if mapped == nil && time.Since(start) > 2*time.Second {
+			unreg()
+			c.Close()
+			return nil, fmt.Errorf("%w：2 秒没收到会合服务器的回执", errBadPort)
+		}
 		if o.timeout > 0 && time.Since(start) > o.timeout {
 			unreg()
 			c.Close()
@@ -164,7 +208,18 @@ func connect(o opts, room, id string) (*session, error) {
 				break
 			}
 			f := strings.Fields(string(buf[:n]))
-			if !from.IP.Equal(srv.IP) || len(f) != 4 || f[0] != "PEER" {
+			if !from.IP.Equal(srv.IP) {
+				continue
+			}
+			if len(f) == 2 && f[0] == "YOU" && mapped == nil {
+				if mapped, _ = net.ResolveUDPAddr("udp4", f[1]); mapped != nil && mapped.Port < 1024 {
+					unreg()
+					c.Close()
+					return nil, fmt.Errorf("%w：映射到了低端口 %s", errBadPort, mapped)
+				}
+				continue
+			}
+			if len(f) != 4 || f[0] != "PEER" {
 				continue
 			}
 			for _, s := range append([]string{f[2]}, strings.Split(f[3], ",")...) {
@@ -180,7 +235,7 @@ func connect(o opts, room, id string) (*session, error) {
 
 	// 2. 打洞：每 20ms 向所有候选发探测；收到对方探测立即回应并"触发检查"；收到回应就打通了
 	punchStart := time.Now()
-	deadline := punchStart.Add(15 * time.Second)
+	deadline := punchStart.Add(4 * time.Second) // 正常 30~300ms 就通，4 秒还不通基本就是这对端口废了
 	var (
 		mu     sync.Mutex
 		chosen *net.UDPAddr
@@ -229,7 +284,7 @@ func connect(o opts, room, id string) (*session, error) {
 		}
 		if time.Now().After(deadline) {
 			c.Close()
-			return nil, fmt.Errorf("打洞超时，对方候选 %v", peerCands)
+			return nil, fmt.Errorf("%w，对方候选 %v", errPunchTimeout, peerCands)
 		}
 	}
 }
