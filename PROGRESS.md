@@ -44,8 +44,10 @@
 - **开发方式**：M4~M5 用"假编码器"产生模拟帧流（60fps，周期性关键帧突发，码率受带宽估计调节），到 M6 再接 ffmpeg；包头预留加密字段，但先跑明文方便抓包，M5 稳定后再上 Noise。
 - ~~服务器部署方式~~：直接 `ssh 99-server`（root），本机交叉编译后上传。
 
-### 0.5.1 待决事项
-- netns 实验室要 sudo（本机 sudo 需要密码）：由用户用 `! sudo ./lab/netns/setup.sh` 运行，或者给这几条 ip/iptables/tc 命令配 NOPASSWD。
+### 0.5.1 M2 netns 实验室：已完成（2026-10-16）
+- 用 `unshare -Urnm` 实现，**不需要 sudo**（不要给 ip/nsenter 配 NOPASSWD，那样等于免密 root）。
+- 打洞矩阵和理论一致；还发现了 Linux NAT 的 conntrack 冲突坑，详见 [06](docs/06-netns实验记录.md)。
+- 下一步：低 TTL 预热、生日攻击，把矩阵里的 ❌ 打通，然后进入 M4 传输层。
 
 ### 0.6 换到有 IPv6 的新电脑后，第一步
 ```bash
