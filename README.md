@@ -11,6 +11,7 @@
   - [05 打洞与传输实现方案](docs/05-打洞与传输实现方案.md)（**主线**，里程碑 M1~M6）
   - [06 netns 实验记录](docs/06-netns实验记录.md)（M2：打洞成功矩阵、conntrack 冲突的坑、低 TTL 预热与生日攻击）
   - [07 传输层 v1 实验记录](docs/07-传输层v1实验记录.md)（M4：自研 vs QUIC vs TCP 在弱网下的对比）
+  - [08 真实网络打洞实测](docs/08-真实网络打洞实测.md)（PC 家宽 ↔ 手机 5G：两端 NAT 行为、CGNAT 端口块、建连耗时与触发检查）
   - [参考资料](docs/参考资料.md)
   - [00 知识归档原件](docs/00-知识归档-原件.md)（2026-10-16 从旧机器迁来的单文件版，只读留档）
 - 实验代码 → `lab/`（Go；除 xfer 的 QUIC 对照组用 quic-go 外只用标准库）
@@ -30,4 +31,9 @@ go run ./punch peer -server 8.140.18.211:7000 -room demo -id A   # 两端分别�
 # 传输层对比（M4）
 ./netns/lab.sh xfer own --netem-a "delay 20ms rate 50mbit loss 1%" --xfer-args "-dur 10s"
 ./netns/xfer-bench.sh 20s                                        # own/quic/tcp × 4 种弱网，输出表格
+
+# 真实网络（PC + USB 调试的手机走移动网络）
+go run ./natprobe stun -bind <wlan0 地址> -servers ip:3478,ip:3478  # 映射 + 端口分配
+./real/pcphone.sh deploy                                         # 交叉编译并推到手机
+./real/pcphone.sh setup "-trigger -interval 20ms" 10             # 不用会合服务器直接打洞，统计建连耗时
 ```
