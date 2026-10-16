@@ -34,6 +34,17 @@ func (r *report) frame(id uint32, key bool, lat time.Duration) {
 	}
 }
 
+// seenTotal 在没收到 BYE 时兜底：用收到过的最大帧号推算总帧数（末尾整段丢失的帧会被漏算）。
+func (r *report) seenTotal() uint32 {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	var n uint32
+	for id := range r.lat {
+		n = max(n, id+1)
+	}
+	return n
+}
+
 func pct(xs []time.Duration, p float64) time.Duration {
 	if len(xs) == 0 {
 		return 0

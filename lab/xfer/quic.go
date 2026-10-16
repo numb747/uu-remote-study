@@ -43,25 +43,28 @@ func dialQUIC(o opts) (frameSink, error) {
 	return &quicSink{conn: conn, deadline: o.deadline}, nil
 }
 
-// Send 为每帧开一个单向流。到截止时间还没送达就 CancelWrite（在 Close 之后调用也有效，会放弃未确认的数据），
+// Send 为每帧开一个单向流。到取消时刻还没送达就 CancelWrite（在 Close 之后调用也有效，会放弃未确认的数据），
 // 这样一帧丢了只影响它自己，不会像 TCP 那样堵住后面的帧。
+//
+// 取消时刻 = 截止时间 + SRTT/2，与 own 对齐：own 在截止时间之前都还会重传，最后一个重传包要再过约半个 RTT 才到，
+// 接收端把它记为"迟到"而不是"丢失"。如果 QUIC 恰好在截止时间就丢弃，同样的帧会被记成丢失、断开解码链，对 QUIC 不公平。
 func (k *quicSink) Send(f fakeenc.Frame) {
 	k.wg.Add(1)
 	go func() {
 		defer k.wg.Done()
-		dl := f.At.Add(k.deadline)
-		ctx, cancel := context.WithDeadline(context.Background(), dl)
+		cancelAt := f.At.Add(k.deadline + k.conn.ConnectionStats().SmoothedRTT/2)
+		ctx, cancel := context.WithDeadline(context.Background(), cancelAt)
 		defer cancel()
 		str, err := k.conn.OpenUniStreamSync(ctx)
 		if err != nil {
 			return
 		}
-		t := time.AfterFunc(time.Until(dl), func() { str.CancelWrite(0) })
-		defer t.Stop()
+		str.SetWriteDeadline(cancelAt) // 被流控/拥塞控制卡住的 Write 到点也要返回
 		if writeFrame(str, f) == nil {
 			str.Close()
 		}
-		<-ctx.Done() // 等到截止时间，让定时器有机会取消未送达的数据
+		<-ctx.Done()
+		str.CancelWrite(0) // 已经全部送达确认的流上这是空操作
 	}()
 }
 

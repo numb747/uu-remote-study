@@ -118,7 +118,12 @@ func recv(o opts) error {
 		return fmt.Errorf("未知模式 %q", o.mode)
 	}
 	if err != nil {
-		return err
+		// 没等到 BYE（连接被关、空闲超时）不代表没传东西：照样输出统计，把"连接异常"和"传输质量差"分开
+		total = rep.seenTotal()
+		if total == 0 {
+			return err
+		}
+		fmt.Printf("[%s] 警告：没收到 BYE（%v），总帧数按收到的最大帧号估计为 %d\n", o.mode, err, total)
 	}
 	fmt.Print(rep.summary(o.mode, total))
 	fmt.Println()
