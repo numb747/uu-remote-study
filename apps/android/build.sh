@@ -16,7 +16,7 @@ CACHE=~/.cache/uu-remote-study
 JAR=$CACHE/android-35/android.jar
 OUT=out
 ROOM_FILE=~/.config/p2pcp/room
-SERVER=${SERVER:-8.140.18.211:7000}
+SERVER=${SERVER:-8.140.18.211:7001}
 
 if [ ! -f "$JAR" ]; then
 	mkdir -p "$CACHE"

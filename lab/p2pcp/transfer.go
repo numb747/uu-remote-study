@@ -85,7 +85,7 @@ func answerPunch(ctx context.Context, tr *quic.Transport) {
 			return
 		}
 		if string(buf[:min(n, 3)]) == msgPunch {
-			tr.WriteTo([]byte(msgAck), from)
+			tr.WriteTo(pktAck, from)
 		}
 	}
 }

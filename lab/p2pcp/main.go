@@ -2,15 +2,18 @@
 //
 //	p2pcp recv   -room demo [-o 目录]              收一次
 //	p2pcp daemon -room demo [-o 目录]              常驻：收完一个接着等下一个
-//	p2pcp send   -room demo [-conns 4] 文件...     发送（多个文件依次发）
+//	p2pcp send   -room demo [-conns 2] 文件...     发送（多个文件依次发）
 //
-// 会合服务器就是 punch server（REG/PEER/UNREG 协议）。-conns N 会打 N 个洞、开 N 条 QUIC 连接，各传文件的一段：
-// 每条连接各自做拥塞控制，在乱序被误判成丢包的链路上（docs/09）比单条快得多。
+// 会合服务器就是 punch server（REG/PEER/UNREG 协议）。-conns N 会打 N 个洞、开 N 条 QUIC 连接，各传文件的一段。
+// 默认拥塞控制是 Hysteria 的 BBR（cc.go）：5G 上的乱序会被 Cubic 误判成丢包，Cubic 时代要靠 4 条连接才能跑满，
+// BBR 1~2 条就够了（docs/09 第 7 节）。
+//
+// 有全局 IPv6 时，IPv4 和 IPv6 同时打洞，先通的用（connectOnce）。
 //
 // 给 GUI 用的两个开关：-progress 在 stdout 输出机器可读的 @STATE/@PROGRESS/@DONE/@ERROR 行（手机 App 解析它），
 // -notify 用 notify-send 弹桌面通知并原地更新进度（电脑端常驻服务用）。
 //
-// 打洞消息以 0x01 开头：quic-go 只把首字节最高两位为 0 的包交给 ReadNonQUICPacket，
+// 打洞消息以 "/"（0x2f）开头：quic-go 只把首字节最高两位为 0 的包交给 ReadNonQUICPacket，
 // 这样 QUIC 接管 socket 之后，对方迟到的打洞包仍然能被识别并回应。
 package main
 
@@ -27,9 +30,24 @@ import (
 )
 
 const (
-	msgPunch = "\x01PP" // 探测
-	msgAck   = "\x01PA" // 回应
+	msgPunch = "/PP" // 探测（按前 3 字节识别；首字节最高两位必须是 0，quic-go 才会交给 ReadNonQUICPacket）
+	msgAck   = "/PA" // 回应
+	msgNom   = "/PN" // 提名：发送端告诉接收端"就用这条"（两端都有 IPv4 + IPv6 两个 socket 时才需要）
 )
+
+// 实际发出的打洞包补到 48 字节，别太像异常小包。（2026-10-17 排查电信 CGNAT 下双向全丢时试过，真正的原因是会合
+// 服务器用了 UDP 7000，见 docs/09 第 7 节；填充本身无害，保留）
+var (
+	pktPunch = pad(msgPunch)
+	pktAck   = pad(msgAck)
+	pktNom   = pad(msgNom)
+)
+
+func pad(m string) []byte {
+	b := make([]byte, 48)
+	copy(b, m)
+	return b
+}
 
 type opts struct {
 	server   string
@@ -37,6 +55,8 @@ type opts struct {
 	bind     string
 	public   string
 	lan      string
+	only4    bool // 不开 IPv6 socket
+	only6    bool // 只向对方的 IPv6 候选打洞（测试用；会合仍走 IPv4）
 	conns    int
 	cc       string
 	out      string
@@ -55,13 +75,15 @@ func main() {
 	}
 	fs := flag.NewFlagSet(role, flag.ExitOnError)
 	var o opts
-	fs.StringVar(&o.server, "server", "8.140.18.211:7000", "会合服务器 IP:端口")
+	fs.StringVar(&o.server, "server", "8.140.18.211:7001", "会合服务器 IP:端口（别用 7000：某些电信 CGNAT 下和 7000 通过信的端口打不了洞，docs/09 第 7 节）")
 	fs.StringVar(&o.room, "room", "p2pcp", "房间名，两端要一致（当作共享密钥用：取一个别人猜不到的）")
 	fs.StringVar(&o.bind, "bind", "", "绑定的本机 IP（开着 TUN 代理时用物理网卡地址）")
 	fs.StringVar(&o.public, "public", "", "本机自己的公网 IP，作为额外候选（1:1 NAT 的云服务器用：会合服务器在本机时看到的是 127.0.0.1）")
-	fs.StringVar(&o.lan, "lan", "", "本机内网 IP 列表（逗号分隔），代替自动探测（Android 11+ 的 App 里 Go 读不到网卡列表）")
-	fs.IntVar(&o.conns, "conns", 4, "发送端：并行连接数（每条各打一个洞）")
-	fs.StringVar(&o.cc, "cc", "cubic", "发送端：拥塞控制 cubic | bbr | brutal:45M（见 cc.go）")
+	fs.StringVar(&o.lan, "lan", "", "本机内网 IP 和全局 IPv6 列表（逗号分隔），代替自动探测（Android 11+ 的 App 里 Go 读不到网卡列表）")
+	fs.BoolVar(&o.only4, "4", false, "只走 IPv4")
+	fs.BoolVar(&o.only6, "6", false, "只走 IPv6（两端都要有全局 IPv6）")
+	fs.IntVar(&o.conns, "conns", 2, "发送端：并行连接数（每条各打一个洞；BBR 下 1~2 条就能跑满，docs/09 第 7 节）")
+	fs.StringVar(&o.cc, "cc", "bbr", "发送端：拥塞控制 bbr | cubic | brutal:45M（见 cc.go）")
 	fs.StringVar(&o.out, "o", ".", "接收端：保存目录")
 	fs.DurationVar(&o.timeout, "timeout", 60*time.Second, "等对方的超时（daemon 模式下无效）")
 	progress := fs.Bool("progress", false, "在 stdout 输出机器可读的进度行")
@@ -161,15 +183,36 @@ func connectOnce(o opts, room, id string) (*session, error) {
 	}
 	c.SetReadBuffer(8 << 20)
 	c.SetWriteBuffer(8 << 20)
+	// 有全局 IPv6 就再开一个 IPv6 socket：IPv6 没有 NAT，只有运营商的状态防火墙，两边同时往外发就能打开，
+	// 也不受 CGNAT 端口块、低端口这些问题影响。会合服务器只有 IPv4，IPv6 地址像内网地址一样作为自报候选交换
+	var c6 *net.UDPConn
+	if ip6 := global6(o); ip6 != nil && !o.only4 {
+		if c6, err = net.ListenUDP("udp6", &net.UDPAddr{IP: ip6}); err == nil {
+			c6.SetReadBuffer(8 << 20)
+			c6.SetWriteBuffer(8 << 20)
+		} else {
+			log.Printf("%s: 开 IPv6 socket 失败（%v），只走 IPv4", room, err)
+			c6 = nil
+		}
+	}
+	closeAll := func() {
+		c.Close()
+		if c6 != nil {
+			c6.Close()
+		}
+	}
 	srv, err := net.ResolveUDPAddr("udp4", o.server)
 	if err != nil {
-		c.Close()
+		closeAll()
 		return nil, err
 	}
 	port := c.LocalAddr().(*net.UDPAddr).Port
 	cands := lanCands(o, port)
 	if o.public != "" {
 		cands = fmt.Sprintf("%s:%d,%s", o.public, port, cands)
+	}
+	if c6 != nil {
+		cands = c6.LocalAddr().String() + "," + cands
 	}
 	reg := fmt.Sprintf("REG %s %s %s", room, id, cands)
 	unreg := func() {
@@ -189,12 +232,12 @@ func connectOnce(o opts, room, id string) (*session, error) {
 	for peerCands == nil {
 		if mapped == nil && time.Since(start) > 2*time.Second {
 			unreg()
-			c.Close()
+			closeAll()
 			return nil, fmt.Errorf("%w：2 秒没收到会合服务器的回执", errBadPort)
 		}
 		if o.timeout > 0 && time.Since(start) > o.timeout {
 			unreg()
-			c.Close()
+			closeAll()
 			return nil, fmt.Errorf("等了 %v，对方没有上线", o.timeout)
 		}
 		if time.Since(lastReg) >= o.regEvery {
@@ -214,7 +257,7 @@ func connectOnce(o opts, room, id string) (*session, error) {
 			if len(f) == 2 && f[0] == "YOU" && mapped == nil {
 				if mapped, _ = net.ResolveUDPAddr("udp4", f[1]); mapped != nil && mapped.Port < 1024 {
 					unreg()
-					c.Close()
+					closeAll()
 					return nil, fmt.Errorf("%w：映射到了低端口 %s", errBadPort, mapped)
 				}
 				continue
@@ -223,25 +266,50 @@ func connectOnce(o opts, room, id string) (*session, error) {
 				continue
 			}
 			for _, s := range append([]string{f[2]}, strings.Split(f[3], ",")...) {
-				if a, err := net.ResolveUDPAddr("udp4", s); err == nil && a.IP != nil {
-					peerCands = append(peerCands, a)
+				a, err := net.ResolveUDPAddr("udp", s)
+				if err != nil || a.IP == nil {
+					continue
 				}
+				if v4 := a.IP.To4() != nil; v4 && o.only6 || !v4 && c6 == nil {
+					continue
+				}
+				peerCands = append(peerCands, a)
 			}
 			break
 		}
 	}
 	// 拿到地址就注销：否则服务器在 30 秒内还会把这次的旧地址推给下一次注册的人
 	unreg()
+	if len(peerCands) == 0 {
+		closeAll()
+		return nil, errors.New("没有能用的对方候选（-6 时两端都要有全局 IPv6）")
+	}
 
-	// 2. 打洞：每 20ms 向所有候选发探测；收到对方探测立即回应并"触发检查"；收到回应就打通了
+	// 2. 打洞：每 20ms 向所有候选发探测；收到对方探测立即回应并"触发检查"；收到回应就打通了。
+	//
+	// IPv4 和 IPv6 两个 socket 同时打，两端各自"先收到回应的"未必是同一条，所以学 ICE 的提名：发送端（之后 QUIC Dial 的一方）
+	// 用第一个回应的路径，并在上面发 /PN；接收端有两个 socket 时等 /PN 再定。/PN 万一全丢了，QUIC 握手包先到哪个 socket
+	// 也就说明了发送端选的是哪条（那个握手包被这里吞掉，quic-go 过一个 PTO 会重发）
 	punchStart := time.Now()
 	deadline := punchStart.Add(4 * time.Second) // 正常 30~300ms 就通，4 秒还不通基本就是这对端口废了
+	controlling := id == "send"
+	waitNom := !controlling && c6 != nil
 	var (
-		mu     sync.Mutex
-		chosen *net.UDPAddr
-		done   = make(chan struct{})
+		mu       sync.Mutex
+		chosen   *net.UDPAddr
+		chosenOn *net.UDPConn
+		done     = make(chan struct{})
 	)
-	go func() {
+	choose := func(c *net.UDPConn, from *net.UDPAddr) {
+		mu.Lock()
+		if chosen == nil {
+			chosen, chosenOn = from, c
+			close(done)
+		}
+		mu.Unlock()
+	}
+	listen := func(c *net.UDPConn) {
+		buf := make([]byte, 1500)
 		triggered := map[string]bool{}
 		for {
 			c.SetReadDeadline(deadline)
@@ -254,39 +322,92 @@ func connectOnce(o opts, room, id string) (*session, error) {
 			}
 			switch string(buf[:min(n, 3)]) {
 			case msgPunch:
-				c.WriteToUDP([]byte(msgAck), from)
+				c.WriteToUDP(pktAck, from)
 				if !triggered[from.String()] {
 					triggered[from.String()] = true
-					c.WriteToUDP([]byte(msgPunch), from)
+					c.WriteToUDP(pktPunch, from)
 				}
 			case msgAck:
-				mu.Lock()
-				if chosen == nil {
-					chosen = from
-					close(done)
+				if !waitNom {
+					choose(c, from)
+					return
 				}
-				mu.Unlock()
-				return
+			case msgNom:
+				if waitNom {
+					choose(c, from)
+					return
+				}
+			default:
+				if waitNom && n >= 1200 && buf[0]&0x80 != 0 { // QUIC Initial：长包头，至少补到 1200 字节
+					choose(c, from)
+					return
+				}
 			}
 		}
-	}()
+	}
+	if !o.only6 { // -6 时 IPv4 socket 只管会合，别应答打洞（否则对方的触发检查会把路径拉回 IPv4）
+		go listen(c)
+	}
+	if c6 != nil {
+		go listen(c6)
+	}
 	tick := time.NewTicker(20 * time.Millisecond)
 	defer tick.Stop()
 	for {
 		for _, a := range peerCands {
-			c.WriteToUDP([]byte(msgPunch), a)
+			via := c
+			if a.IP.To4() == nil {
+				via = c6
+			}
+			if _, err := via.WriteToUDP(pktPunch, a); err != nil && os.Getenv("P2PCP_DEBUG") != "" {
+				log.Printf("%s: 发往 %s 失败: %v", room, a, err)
+			}
 		}
 		select {
 		case <-done:
-			c.SetReadDeadline(time.Time{})
-			return &session{conn: c, peer: chosen, took: time.Since(punchStart)}, nil
+			if controlling {
+				for range 3 {
+					chosenOn.WriteToUDP(pktNom, chosen)
+				}
+			}
+			if c6 != nil {
+				if chosenOn == c {
+					c6.Close()
+				} else {
+					c.Close()
+				}
+			}
+			chosenOn.SetReadDeadline(time.Time{})
+			return &session{conn: chosenOn, peer: chosen, took: time.Since(punchStart)}, nil
 		case <-tick.C:
 		}
 		if time.Now().After(deadline) {
-			c.Close()
+			closeAll()
 			return nil, fmt.Errorf("%w，对方候选 %v", errPunchTimeout, peerCands)
 		}
 	}
+}
+
+// global6 返回本机一个全局 IPv6 地址（不要 ULA、链路本地），没有就返回 nil。
+// -lan 里给了 IPv6 就用它（Android App 由 Java 传进来）；否则问内核"去公网 IPv6 走哪个源地址"——对 UDP 做 connect
+// 不发包，只查路由，拿到的就是默认出口上的地址，不会挑到 docker、虚拟网卡上的。默认 IPv6 路由被 TUN 代理接管时，
+// 拿到的是 TUN 的 ULA 地址，被过滤掉，宁可不走 IPv6
+func global6(o opts) net.IP {
+	var ips []net.IP
+	if o.lan != "" {
+		for _, s := range strings.Split(o.lan, ",") {
+			ips = append(ips, net.ParseIP(strings.TrimSpace(s)))
+		}
+	} else if c, err := net.Dial("udp6", "[2400:3200::1]:53"); err == nil { // 阿里 DNS，只用来选路
+		ips = append(ips, c.LocalAddr().(*net.UDPAddr).IP)
+		c.Close()
+	}
+	for _, ip := range ips {
+		if ip != nil && ip.To4() == nil && ip.IsGlobalUnicast() && !ip.IsPrivate() {
+			return ip
+		}
+	}
+	return nil
 }
 
 // lanCands 返回本机内网候选 "ip:port,..."。
@@ -308,8 +429,8 @@ func lanCands(o opts, port int) string {
 	}
 	var out []string
 	for _, ip := range ips {
-		if ip = strings.TrimSpace(ip); ip != "" {
-			out = append(out, fmt.Sprintf("%s:%d", ip, port))
+		if p := net.ParseIP(strings.TrimSpace(ip)); p != nil && p.To4() != nil { // IPv6 由 global6 单独处理
+			out = append(out, fmt.Sprintf("%s:%d", p, port))
 		}
 	}
 	if len(out) == 0 {

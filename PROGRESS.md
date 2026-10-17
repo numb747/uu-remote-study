@@ -65,12 +65,18 @@
 ### 0.5.4 打洞传文件 p2pcp（2026-10-16）
 - `lab/p2pcp`：会合（punch server，UDP 7000）→ 打洞 → quic-go 接管同一个 socket；`-conns N` 多连接分段并行，传完校验 sha256。
 - 296MB 测试视频从手机（5G）传到 PC：1 条连接 17.9Mbps（Cubic 被乱序误判的"丢包"拖住），4 条 45Mbps、8 条 47Mbps；手机直传服务器 48Mbps → 瓶颈就是 5G 上行，直连已跑到 95%。多连接的代价是 SRTT 涨到约 200ms。详见 [09](docs/09-打洞传文件.md)。
-- 会合服务器已做成常驻：99-server 上的 `uu-rendezvous.service`（UDP 7000）。
+- 会合服务器已做成常驻：99-server 上的 `uu-rendezvous.service`（UDP 7000）；2026-10-17 起客户端默认用 `uu-rendezvous-7001.service`（UDP 7001，见 0.5.6）。
 - 封装成软件「P2P 直传」（`apps/`）：手机 App（不用 Gradle 打包；Go 核心伪装成 .so）+ 电脑端 systemd 用户服务、启动器和 Dolphin 右键。两个方向都已实测可用（docs/09 第 5 节）。房间密钥在 `~/.config/p2pcp/room`。
 
 ### 0.5.5 打洞心智模型讨论（2026-10-16，进行中）
 - 讨论式梳理概念（STUN / socket / 信令 / TURN / 协议层级 / STUN 报文），结论与待答问题见 [打洞心智模型-讨论记录](docs/打洞心智模型-讨论记录.md)。
 - 配套架构地图在 `docs/arch/`（以打洞为主线：总览、模块、4 条流程、netns NAT 细节）。
+
+### 0.5.6 p2pcp：会合端口改 7001、默认 BBR、IPv6 候选（2026-10-17）
+- 手机换到另一台电信 CGNAT（`27.128.49.243`）后，p2pcp 全部打不通。排除法定位：socket 和 UDP 7000 通过信后，发往别处的包会被运营商丢掉。会合改到 **UDP 7001** 后，第一轮就打通。99-server 新增 `uu-rendezvous-7001.service`，原来的 7000 保留。
+- 5G 上行：BBR 1 条 53Mbps、2 条 56Mbps，Cubic 4 条 43Mbps、1 条 27Mbps；局域网 BBR 267~295Mbps。**默认改为 `-cc bbr -conns 2`**。
+- IPv6：有全局地址时再开一个 IPv6 socket，`[v6]:port` 作为自报候选经 IPv4 会合交换，两条路同时打洞，由发送端提名（`/PN`）。在 netns 里测了 4 种组合，真实网络上测了"只有一端有 IPv6"。手机 5G 有 IPv6；PC 所在 Wi-Fi 的路由器不下发前缀，要在路由器上开 IPv6 才能真正走上。
+- 详见 [09 第 7 节](docs/09-打洞传文件.md)。手机 App 新版已打包（`apps/android/out/`），还没装上，安装时要在手机上点确认。
 
 ### 0.6 换到有 IPv6 的新电脑后，第一步
 ```bash
@@ -79,6 +85,6 @@ ping -6 -c 3 2400:3200::1             # 阿里 DNS，验证 IPv6 出网
 curl -6 -s https://ipv6.icanhazip.com # 看自己的公网 IPv6
 ping -6 -c 3 <服务器的 IPv6>           # 阿里云 ECS 默认没有 IPv6，需要在 VPC 里单独开启
 ```
-- 注意：附录里的 `stunprobe` / `punch` 目前**只支持 IPv4**（用的是 `udp4`）。给它们加上 IPv6 候选，是新电脑上最自然的第一个练习：IPv6 打洞基本就是"双方同时发包穿过状态防火墙"。
+- 注意：附录里的 `stunprobe` / `punch` 目前**只支持 IPv4**（用的是 `udp4`）；`lab/p2pcp` 已支持 IPv6 候选（`-6` 强制只走 IPv6，09 第 7.3 节）。给它们加上 IPv6 候选，是新电脑上最自然的第一个练习：IPv6 打洞基本就是"双方同时发包穿过状态防火墙"。
 - 测试 IPv6 直连，需要另一端也有 IPv6（手机 4G/5G 热点通常就有）。
 - 新电脑上如果也开着 TUN 代理，要让 STUN/打洞流量直连，否则看到的是代理出口的地址。

@@ -31,6 +31,7 @@ import java.io.InputStream;
 import java.io.InputStreamReader;
 import java.io.OutputStream;
 import java.net.Inet4Address;
+import java.net.Inet6Address;
 import java.net.InetAddress;
 import java.net.NetworkInterface;
 import java.util.ArrayList;
@@ -335,7 +336,7 @@ public class MainActivity extends Activity {
         } catch (Exception ignored) {
         }
         room = p.getProperty("room", "p2pcp");
-        server = p.getProperty("server", "8.140.18.211:7000");
+        server = p.getProperty("server", "8.140.18.211:7001");
     }
 
     /** Go 在 Android 11+ 的 App 里读不到网卡列表（netlink 被限制），由 Java 取好内网 IPv4 传给它，用于同一局域网时走内网。 */
@@ -345,9 +346,14 @@ public class MainActivity extends Activity {
             for (NetworkInterface ni : Collections.list(NetworkInterface.getNetworkInterfaces())) {
                 if (!ni.isUp() || ni.isLoopback()) continue;
                 for (InetAddress a : Collections.list(ni.getInetAddresses())) {
-                    if (a instanceof Inet4Address) {
+                    // IPv4 内网地址 + 全局 IPv6（5G 一般都有；不要链路本地、ULA fc00::/7 和 VPN 网卡上的）
+                    boolean v6 = a instanceof Inet6Address && !a.isLinkLocalAddress()
+                            && (a.getAddress()[0] & 0xfe) != 0xfc && !ni.getName().startsWith("tun");
+                    if (a instanceof Inet4Address || v6) {
+                        String s = a.getHostAddress();
+                        int pct = s.indexOf('%');
                         if (sb.length() > 0) sb.append(',');
-                        sb.append(a.getHostAddress());
+                        sb.append(pct < 0 ? s : s.substring(0, pct));
                     }
                 }
             }

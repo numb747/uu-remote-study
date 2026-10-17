@@ -8,7 +8,7 @@
 set -euo pipefail
 BIN=~/.local/bin/p2pcp
 ROOM=$(cat ~/.config/p2pcp/room)
-SERVER=${P2P_SERVER:-8.140.18.211:7000}
+SERVER=${P2P_SERVER:-8.140.18.211:7001}
 
 # 开着 sing-box TUN 时，要绑物理网卡的地址才能打洞（否则走的是代理出口）：取 main 表默认路由那块网卡
 bind_ip() {
