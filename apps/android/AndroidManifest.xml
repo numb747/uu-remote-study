@@ -3,6 +3,8 @@
     package="dev.uulab.p2p">
 
     <uses-permission android:name="android.permission.INTERNET" />
+    <!-- 监听网络切换（Wi-Fi ↔ 5G），换网后重启 daemon，让 -lan 里的地址跟着变 -->
+    <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
 
     <!-- extractNativeLibs：把 libp2pcp.so（其实是 Go 编译的可执行文件）解压到 nativeLibraryDir，那里允许 exec -->
     <application

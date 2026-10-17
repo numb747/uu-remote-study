@@ -3,6 +3,7 @@
 //	p2pcp recv   -room demo [-o 目录]              收一次
 //	p2pcp daemon -room demo [-o 目录]              常驻：收完一个接着等下一个
 //	p2pcp send   -room demo [-conns 2] 文件...     发送（多个文件依次发）
+//	p2pcp check                                   网络体检：会合端口通不通、有没有"毒端口"、NAT 映射、IPv6（check.go）
 //
 // 会合服务器就是 punch server（REG/PEER/UNREG 协议）。-conns N 会打 N 个洞、开 N 条 QUIC 连接，各传文件的一段。
 // 默认拥塞控制是 Hysteria 的 BBR（cc.go）：5G 上的乱序会被 Cubic 误判成丢包，Cubic 时代要靠 4 条连接才能跑满，
@@ -26,6 +27,7 @@ import (
 	"os"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 )
 
@@ -34,6 +36,9 @@ const (
 	msgAck   = "/PA" // 回应
 	msgNom   = "/PN" // 提名：发送端告诉接收端"就用这条"（两端都有 IPv4 + IPv6 两个 socket 时才需要）
 )
+
+// 默认会合地址：同一台服务器的几个端口，房间共享。7001 放前面：7000 在某台电信 CGNAT 下有毒（docs/09 第 7 节）
+const defaultServers = "8.140.18.211:7001,8.140.18.211:7000"
 
 // 实际发出的打洞包补到 48 字节，别太像异常小包。（2026-10-17 排查电信 CGNAT 下双向全丢时试过，真正的原因是会合
 // 服务器用了 UDP 7000，见 docs/09 第 7 节；填充本身无害，保留）
@@ -70,14 +75,14 @@ func main() {
 		usage()
 	}
 	role := os.Args[1]
-	if role != "send" && role != "recv" && role != "daemon" {
+	if role != "send" && role != "recv" && role != "daemon" && role != "check" {
 		usage()
 	}
 	fs := flag.NewFlagSet(role, flag.ExitOnError)
 	var o opts
-	fs.StringVar(&o.server, "server", "8.140.18.211:7001", "会合服务器 IP:端口（别用 7000：某些电信 CGNAT 下和 7000 通过信的端口打不了洞，docs/09 第 7 节）")
+	fs.StringVar(&o.server, "server", defaultServers, "会合服务器 IP:端口，逗号分隔多个时每轮换一个（服务器那边房间共享，docs/09 第 8 节）")
 	fs.StringVar(&o.room, "room", "p2pcp", "房间名，两端要一致（当作共享密钥用：取一个别人猜不到的）")
-	fs.StringVar(&o.bind, "bind", "", "绑定的本机 IP（开着 TUN 代理时用物理网卡地址）")
+	fs.StringVar(&o.bind, "bind", "", "绑定的本机 IP（开着 TUN 代理时用物理网卡地址）；auto = 每轮取 main 表默认路由那块网卡的地址")
 	fs.StringVar(&o.public, "public", "", "本机自己的公网 IP，作为额外候选（1:1 NAT 的云服务器用：会合服务器在本机时看到的是 127.0.0.1）")
 	fs.StringVar(&o.lan, "lan", "", "本机内网 IP 和全局 IPv6 列表（逗号分隔），代替自动探测（Android 11+ 的 App 里 Go 读不到网卡列表）")
 	fs.BoolVar(&o.only4, "4", false, "只走 IPv4")
@@ -106,12 +111,27 @@ func main() {
 		}
 	case "recv":
 		err = recv(o)
+	case "check":
+		err = check(o)
 	case "daemon":
 		// 常驻：5 秒注册一次就够了（家用路由器映射寿命 60 秒以上，docs/08）。对方一注册，服务器会立刻把 PEER 推过来
 		o.timeout, o.regEvery = 0, 5*time.Second
+		backoff := time.Duration(0)
 		for {
 			o.rep.state("等待对方发送")
-			if err := recv(o); err != nil {
+			err := recv(o)
+			switch {
+			case err == nil:
+				backoff = 0
+			case errors.Is(err, errNoRendezvous):
+				// 空等时连不上会合服务器（断网、换网络、服务器重启）：没人在传，不弹失败通知，只更新状态，
+				// 重试间隔从 5 秒拉长到 1 分钟，网络回来后最多一分钟内自己恢复
+				backoff = min(max(2*backoff, 5*time.Second), time.Minute)
+				log.Print(err)
+				o.rep.state(fmt.Sprintf("连不上会合服务器，%v 后重试", backoff))
+				time.Sleep(backoff)
+			default:
+				backoff = 0
 				o.rep.fail(err)
 				time.Sleep(time.Second)
 			}
@@ -124,7 +144,7 @@ func main() {
 }
 
 func usage() {
-	fmt.Println("usage: p2pcp send|recv|daemon [flags] [文件...]")
+	fmt.Println("usage: p2pcp send|recv|daemon|check [flags] [文件...]")
 	os.Exit(2)
 }
 
@@ -142,39 +162,71 @@ type session struct {
 // 偶发的"双方地址都对、两个方向却一个包都过不去"（docs/09 第 6 节）：某一侧 NAT 因为对方的包先到而留下了冲突状态，
 // 给我们出去的包换了端口（docs/06 的 conntrack 冲突），这一对端口就废了。换一对新端口，冲突状态就不在了。
 // 双方的单轮超时一样长、又几乎同时开始，所以会一起超时、一起重新注册，由会合服务器重新配对。
+//
+// 会合服务器可以给多个地址（-server a,b,c，服务器那边房间共享）：每轮换下一个，某个端口被运营商拦了（docs/09 第 7 节）
+// 也只是多花一轮。哪个地址打通过就记住，下次从它开始。
 func connect(o opts, room, id string) (*session, error) {
 	const attempts = 6
+	servers := strings.Split(o.server, ",")
+	first := int(goodServer.Load())
 	start := time.Now()
-	var err error
+	var (
+		err      error
+		punchTOs int // 拿到了对方地址、却没打通的轮数
+	)
 	for i := range attempts {
+		k := (first + i) % len(servers)
 		var s *session
-		if s, err = connectOnce(o, room, id); err == nil {
+		if s, err = connectOnce(o, servers[k], room, id); err == nil {
 			s.took = time.Since(start)
+			goodServer.Store(int32(k))
 			if i > 0 {
-				log.Printf("%s: 第 %d 轮才打通", room, i+1)
+				log.Printf("%s: 第 %d 轮才打通（会合 %s）", room, i+1, servers[k])
 			}
 			return s, nil
 		}
-		if !errors.Is(err, errPunchTimeout) && !errors.Is(err, errBadPort) {
+		if errors.Is(err, errPunchTimeout) {
+			punchTOs++
+		} else if !errors.Is(err, errBadPort) && !errors.Is(err, errLost) {
 			return nil, err // 等不到对方之类的错误，重来也没用
 		}
-		log.Printf("%s: 第 %d 轮失败（%v），换端口重来", room, i+1, err)
+		log.Printf("%s: 第 %d 轮失败（会合 %s：%v），换端口重来", room, i+1, servers[k], err)
+	}
+	// 按层说清楚坏在哪：昨天能用今天不能用，多半是网络环境变了，先知道是哪一层
+	switch {
+	case punchTOs == attempts:
+		return nil, fmt.Errorf("能会合、拿到了对方地址，但 %d 轮都没打通：两边之间的 UDP 直连被拦了（运营商换了 NAT、拦了端口，或者对称型 NAT）。"+
+			"用 p2pcp check 看看是不是会合端口出了问题：%w", attempts, err)
+	case punchTOs == 0:
+		return nil, fmt.Errorf("%w %s：本机断网、服务器挂了，或者这些端口都被拦了（p2pcp check 逐个测）：%w", errNoRendezvous, o.server, err)
 	}
 	return nil, err
 }
+
+var goodServer atomic.Int32 // 上次打通用的是第几个会合地址
 
 var (
 	errPunchTimeout = errors.New("打洞超时")
 	// errBadPort：会合服务器的回执没收到，或者收到了但映射端口 < 1024。电信 CGNAT 端口不够时会分 1~437 的低端口，
 	// 这些端口上外面的包进不来（连会合服务器的回包都收不到），整个 socket 只能扔掉
 	errBadPort = errors.New("这个端口外面进不来")
+	// errLost：等对方的时候，会合服务器的回执断了。多半是网络变了（换 Wi-Fi、5G 切换、地址变了），这个 socket 的映射已经作废
+	errLost = errors.New("会合服务器失联")
+	// errNoRendezvous：几轮下来一次都没拿到对方地址，问题在本机到会合服务器这一段，还没轮到打洞
+	errNoRendezvous = errors.New("连不上会合服务器")
 )
 
 // connectOnce 用一个新 socket 注册、拿对方候选、打洞。对方的候选 = 服务器看到的公网映射 + 对方自报的内网地址，
 // 哪个先回应就用哪个（同一个局域网时内网地址 RTT 小，自然先回来）。
-func connectOnce(o opts, room, id string) (*session, error) {
+func connectOnce(o opts, server, room, id string) (*session, error) {
 	var ip net.IP
-	if o.bind != "" {
+	if o.bind == "auto" { // 每轮现取：电脑换了网络，常驻服务不用重启
+		if ip = defaultRouteIP(); ip != nil {
+			o.bind = ip.String()
+		} else {
+			o.bind = ""
+		}
+	} else if o.bind != "" {
 		ip = net.ParseIP(o.bind)
 	}
 	c, err := net.ListenUDP("udp4", &net.UDPAddr{IP: ip})
@@ -201,7 +253,7 @@ func connectOnce(o opts, room, id string) (*session, error) {
 			c6.Close()
 		}
 	}
-	srv, err := net.ResolveUDPAddr("udp4", o.server)
+	srv, err := net.ResolveUDPAddr("udp4", server)
 	if err != nil {
 		closeAll()
 		return nil, err
@@ -227,6 +279,7 @@ func connectOnce(o opts, room, id string) (*session, error) {
 	start := time.Now()
 	var (
 		lastReg time.Time
+		lastYou time.Time
 		mapped  *net.UDPAddr // 会合服务器回执里的本方公网映射
 	)
 	for peerCands == nil {
@@ -234,6 +287,11 @@ func connectOnce(o opts, room, id string) (*session, error) {
 			unreg()
 			closeAll()
 			return nil, fmt.Errorf("%w：2 秒没收到会合服务器的回执", errBadPort)
+		}
+		if mapped != nil && time.Since(lastYou) > 3*o.regEvery+2*time.Second {
+			unreg()
+			closeAll()
+			return nil, fmt.Errorf("%w：%v 没收到回执", errLost, time.Since(lastYou).Round(time.Second))
 		}
 		if o.timeout > 0 && time.Since(start) > o.timeout {
 			unreg()
@@ -254,7 +312,11 @@ func connectOnce(o opts, room, id string) (*session, error) {
 			if !from.IP.Equal(srv.IP) {
 				continue
 			}
-			if len(f) == 2 && f[0] == "YOU" && mapped == nil {
+			if len(f) == 2 && f[0] == "YOU" {
+				lastYou = time.Now()
+				if mapped != nil {
+					continue
+				}
 				if mapped, _ = net.ResolveUDPAddr("udp4", f[1]); mapped != nil && mapped.Port < 1024 {
 					unreg()
 					closeAll()
@@ -437,4 +499,36 @@ func lanCands(o opts, port int) string {
 		return "-"
 	}
 	return strings.Join(out, ",")
+}
+
+// defaultRouteIP 返回 main 路由表里默认路由那块网卡的 IPv4 地址（读 /proc/net/route，它只列 main 表）。
+// 开着 sing-box 这类 TUN 代理时，代理的默认路由在别的策略路由表里，main 表的默认路由仍是物理网卡，正好是打洞要绑的那块
+func defaultRouteIP() net.IP {
+	b, err := os.ReadFile("/proc/net/route")
+	if err != nil {
+		return nil
+	}
+	best, bestMetric := "", 1<<30
+	for _, line := range strings.Split(string(b), "\n")[1:] {
+		f := strings.Fields(line)
+		if len(f) < 8 || f[1] != "00000000" || f[7] != "00000000" {
+			continue
+		}
+		var metric int
+		fmt.Sscan(f[6], &metric)
+		if metric < bestMetric {
+			best, bestMetric = f[0], metric
+		}
+	}
+	ifc, err := net.InterfaceByName(best)
+	if err != nil {
+		return nil
+	}
+	addrs, _ := ifc.Addrs()
+	for _, a := range addrs {
+		if n, ok := a.(*net.IPNet); ok && n.IP.To4() != nil {
+			return n.IP.To4()
+		}
+	}
+	return nil
 }

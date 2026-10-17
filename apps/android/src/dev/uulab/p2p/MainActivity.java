@@ -7,6 +7,10 @@ import android.database.Cursor;
 import android.graphics.Color;
 import android.graphics.Typeface;
 import android.graphics.drawable.GradientDrawable;
+import android.net.ConnectivityManager;
+import android.net.LinkAddress;
+import android.net.LinkProperties;
+import android.net.Network;
 import android.net.Uri;
 import android.os.Bundle;
 import android.os.Environment;
@@ -33,7 +37,6 @@ import java.io.OutputStream;
 import java.net.Inet4Address;
 import java.net.Inet6Address;
 import java.net.InetAddress;
-import java.net.NetworkInterface;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.List;
@@ -55,7 +58,8 @@ public class MainActivity extends Activity {
     String room, server;
     Panel sendPanel, recvPanel;
     TextView logView;
-    Process daemon;
+    volatile Process daemon;
+    ConnectivityManager.NetworkCallback netWatch;
     volatile boolean alive = true;
 
     /** 一块显示区：标题、状态、进度条、详情。 */
@@ -137,7 +141,7 @@ public class MainActivity extends Activity {
         root.setBackgroundColor(BG);
 
         root.addView(text("P2P 直传", 26, BLUE, true));
-        root.addView(text("打洞直连 · 不经服务器中转 · " + server, 12, DIM, false));
+        root.addView(text("打洞直连 · 不经服务器中转 · 会合 " + server.split(":")[0], 12, DIM, false));
 
         Button pick = new Button(this);
         pick.setText("选择文件，发到电脑");
@@ -175,6 +179,7 @@ public class MainActivity extends Activity {
         setContentView(sv);
 
         startDaemon();
+        watchNetwork();
         handleShare(getIntent());
     }
 
@@ -187,6 +192,7 @@ public class MainActivity extends Activity {
     @Override
     protected void onDestroy() {
         alive = false;
+        if (netWatch != null) getSystemService(ConnectivityManager.class).unregisterNetworkCallback(netWatch);
         if (daemon != null) daemon.destroy();
         super.onDestroy();
     }
@@ -256,6 +262,48 @@ public class MainActivity extends Activity {
                 sleep(2000); // 进程意外退出就重启
             }
         }).start();
+    }
+
+    /**
+     * 换网（Wi-Fi ↔ 5G、地址变了）后重启 daemon：-lan 是启动时算的，旧地址会让对方白打一个候选，IPv6 socket 也会绑不上。
+     * 只看 IPv4 地址集合和"有没有 IPv6"，IPv6 临时地址每天轮换一次，那种变化不值得打断可能正在进行的接收。
+     * Go 那边另有保活（会合回执断了就换 socket），这里只负责让地址列表跟上。
+     */
+    void watchNetwork() {
+        ConnectivityManager cm = getSystemService(ConnectivityManager.class);
+        netWatch = new ConnectivityManager.NetworkCallback() {
+            String last = netKey();
+
+            @Override
+            public void onLinkPropertiesChanged(Network n, LinkProperties lp) {
+                check();
+            }
+
+            @Override
+            public void onLost(Network n) {
+                check();
+            }
+
+            void check() {
+                String k = netKey();
+                if (k.equals(last)) return;
+                post(() -> appendLog("网络变了（" + last + " → " + k + "），重启接收"));
+                last = k;
+                Process d = daemon;
+                if (d != null) d.destroy(); // startDaemon 的循环 2 秒后用新地址重启它
+            }
+        };
+        cm.registerDefaultNetworkCallback(netWatch);
+    }
+
+    String netKey() {
+        StringBuilder v4 = new StringBuilder();
+        boolean v6 = false;
+        for (String ip : lanIPs().split(",")) {
+            if (ip.contains(":")) v6 = true;
+            else if (!ip.isEmpty()) v4.append(ip).append(' ');
+        }
+        return v4.toString().trim() + (v6 ? " +IPv6" : "");
     }
 
     /** 收完的文件从缓存挪进公共「下载/P2P直传」（MediaStore，不需要存储权限）。 */
@@ -336,28 +384,30 @@ public class MainActivity extends Activity {
         } catch (Exception ignored) {
         }
         room = p.getProperty("room", "p2pcp");
-        server = p.getProperty("server", "8.140.18.211:7001");
+        server = p.getProperty("server", "8.140.18.211:7001,8.140.18.211:7000");
     }
 
-    /** Go 在 Android 11+ 的 App 里读不到网卡列表（netlink 被限制），由 Java 取好内网 IPv4 传给它，用于同一局域网时走内网。 */
-    static String lanIPs() {
+    /**
+     * Go 在 Android 11+ 的 App 里读不到网卡列表（netlink 被限制），由 Java 取好地址传给它：IPv4 内网地址（同一局域网时走内网）
+     * 和全局 IPv6。只取当前默认网络的：刚从 5G 切到 Wi-Fi 时，5G 网卡还会挂一阵，它的地址这时已经用不上了；VPN 的 tun 也不算。
+     */
+    String lanIPs() {
+        List<InetAddress> addrs = new ArrayList<>();
+        ConnectivityManager cm = getSystemService(ConnectivityManager.class);
+        LinkProperties lp = cm.getLinkProperties(cm.getActiveNetwork());
+        if (lp != null) {
+            for (LinkAddress la : lp.getLinkAddresses()) addrs.add(la.getAddress());
+        }
         StringBuilder sb = new StringBuilder();
-        try {
-            for (NetworkInterface ni : Collections.list(NetworkInterface.getNetworkInterfaces())) {
-                if (!ni.isUp() || ni.isLoopback()) continue;
-                for (InetAddress a : Collections.list(ni.getInetAddresses())) {
-                    // IPv4 内网地址 + 全局 IPv6（5G 一般都有；不要链路本地、ULA fc00::/7 和 VPN 网卡上的）
-                    boolean v6 = a instanceof Inet6Address && !a.isLinkLocalAddress()
-                            && (a.getAddress()[0] & 0xfe) != 0xfc && !ni.getName().startsWith("tun");
-                    if (a instanceof Inet4Address || v6) {
-                        String s = a.getHostAddress();
-                        int pct = s.indexOf('%');
-                        if (sb.length() > 0) sb.append(',');
-                        sb.append(pct < 0 ? s : s.substring(0, pct));
-                    }
-                }
+        for (InetAddress a : addrs) {
+            // 不要链路本地和 ULA fc00::/7
+            boolean v6 = a instanceof Inet6Address && !a.isLinkLocalAddress() && (a.getAddress()[0] & 0xfe) != 0xfc;
+            if (a instanceof Inet4Address || v6) {
+                String s = a.getHostAddress();
+                int pct = s.indexOf('%');
+                if (sb.length() > 0) sb.append(',');
+                sb.append(pct < 0 ? s : s.substring(0, pct));
             }
-        } catch (Exception ignored) {
         }
         return sb.toString();
     }

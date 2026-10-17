@@ -16,7 +16,7 @@ CACHE=~/.cache/uu-remote-study
 JAR=$CACHE/android-35/android.jar
 OUT=out
 ROOM_FILE=~/.config/p2pcp/room
-SERVER=${SERVER:-8.140.18.211:7001}
+SERVER=${SERVER:-8.140.18.211:7001,8.140.18.211:7000}  # 同一台服务器的几个端口，p2pcp 每轮换一个
 
 if [ ! -f "$JAR" ]; then
 	mkdir -p "$CACHE"

@@ -2,7 +2,7 @@
 // 这就是 ICE/UU远程/RustDesk/Tailscale 打洞的核心骨架，去掉了加密、认证与 TURN 中继。
 //
 //	服务器 (需要公网 IP，例如一台 VPS):
-//	  go run . server -listen :7000
+//	  go run . server -listen :7000          （可以听多个端口，房间共享：-listen :7000,:7001）
 //	两个对等端 (分别在两个不同 NAT 后面):
 //	  go run . peer -server VPS:7000 -room demo -id A
 //	  go run . peer -server VPS:7000 -room demo -id B
@@ -58,52 +58,90 @@ func main() {
 type member struct {
 	pub, lan string
 	seen     time.Time
+	conn     *net.UDPConn // 它是从哪个监听端口进来的：回包必须从同一个端口发，否则过不了对方 NAT 的过滤
 }
 
+// runServer 可以同时听多个端口（-listen :7000,:7001），房间是共享的：两端从不同端口注册也能配上对。
+// 某个端口被运营商拦了（docs/09 第 7 节），客户端换个端口就行，不用两端约好同一个端口。
 func runServer(args []string) {
 	fs := flag.NewFlagSet("server", flag.ExitOnError)
-	listen := fs.String("listen", ":7000", "UDP 监听地址")
+	listen := fs.String("listen", ":7000", "UDP 监听地址，逗号分隔可以听多个")
 	fs.Parse(args)
 
-	conn, err := net.ListenUDP("udp", mustResolve(*listen))
-	if err != nil {
-		log.Fatal(err)
-	}
-	log.Printf("rendezvous listening on %s", conn.LocalAddr())
-	rooms := map[string]map[string]*member{}
-	buf := make([]byte, 1500)
-	for {
-		n, from, err := conn.ReadFromUDP(buf)
-		if err != nil {
-			continue
+	var (
+		mu    sync.Mutex
+		rooms = map[string]map[string]*member{}
+	)
+	// 清理：会合只在头几秒有用，5 分钟没再注册的成员、空房间都删掉，常驻服务的内存才不会一直涨
+	go func() {
+		for range time.Tick(time.Minute) {
+			mu.Lock()
+			for r, m := range rooms {
+				for id, o := range m {
+					if time.Since(o.seen) > 5*time.Minute {
+						delete(m, id)
+					}
+				}
+				if len(m) == 0 {
+					delete(rooms, r)
+				}
+			}
+			mu.Unlock()
 		}
-		f := strings.Fields(string(buf[:n]))
-		if len(f) == 3 && f[0] == "UNREG" { // 已经拿到对方地址，别再把自己推给后来者
-			delete(rooms[f[1]], f[2])
-			continue
-		}
-		if len(f) != 4 || f[0] != "REG" {
-			continue
-		}
-		room, id, lan := f[1], f[2], f[3]
-		// 告诉对方它的公网映射：客户端据此发现"分到的端口进不来"（比如运营商 CGNAT 分了被拦截的低端口，docs/09）
-		conn.WriteToUDP([]byte("YOU "+from.String()), from)
-		if rooms[room] == nil {
-			rooms[room] = map[string]*member{}
-		}
-		m := rooms[room]
-		if old, ok := m[id]; !ok || old.pub != from.String() {
-			// 服务器看到的源地址 = 对方 NAT 分配的公网映射，这正是 STUN 做的事
-			log.Printf("room=%s id=%s pub=%s lan=%s", room, id, from, lan)
-		}
-		m[id] = &member{pub: from.String(), lan: lan, seen: time.Now()}
-		for oid, o := range m {
-			if oid == id || time.Since(o.seen) > 30*time.Second {
+	}()
+
+	serve := func(conn *net.UDPConn) {
+		buf := make([]byte, 1500)
+		for {
+			n, from, err := conn.ReadFromUDP(buf)
+			if err != nil {
 				continue
 			}
-			// 双向交换：两边几乎同时拿到对方地址，同时开始往外发包 —— "同时打开"
-			conn.WriteToUDP([]byte(fmt.Sprintf("PEER %s %s %s", oid, o.pub, o.lan)), from)
-			conn.WriteToUDP([]byte(fmt.Sprintf("PEER %s %s %s", id, from, lan)), mustResolve(o.pub))
+			f := strings.Fields(string(buf[:n]))
+			if len(f) == 3 && f[0] == "UNREG" { // 已经拿到对方地址，别再把自己推给后来者
+				mu.Lock()
+				delete(rooms[f[1]], f[2])
+				mu.Unlock()
+				continue
+			}
+			if len(f) != 4 || f[0] != "REG" {
+				continue
+			}
+			room, id, lan := f[1], f[2], f[3]
+			// 告诉对方它的公网映射：客户端据此发现"分到的端口进不来"（比如运营商 CGNAT 分了被拦截的低端口，docs/09）
+			conn.WriteToUDP([]byte("YOU "+from.String()), from)
+			mu.Lock()
+			if rooms[room] == nil {
+				rooms[room] = map[string]*member{}
+			}
+			m := rooms[room]
+			if old, ok := m[id]; !ok || old.pub != from.String() {
+				// 服务器看到的源地址 = 对方 NAT 分配的公网映射，这正是 STUN 做的事
+				log.Printf("room=%s id=%s pub=%s lan=%s via=%s", room, id, from, lan, conn.LocalAddr())
+			}
+			m[id] = &member{pub: from.String(), lan: lan, seen: time.Now(), conn: conn}
+			for oid, o := range m {
+				if oid == id || time.Since(o.seen) > 30*time.Second {
+					continue
+				}
+				// 双向交换：两边几乎同时拿到对方地址，同时开始往外发包 —— "同时打开"
+				conn.WriteToUDP([]byte(fmt.Sprintf("PEER %s %s %s", oid, o.pub, o.lan)), from)
+				o.conn.WriteToUDP([]byte(fmt.Sprintf("PEER %s %s %s", id, from, lan)), mustResolve(o.pub))
+			}
+			mu.Unlock()
+		}
+	}
+	addrs := strings.Split(*listen, ",")
+	for i, a := range addrs {
+		conn, err := net.ListenUDP("udp", mustResolve(a))
+		if err != nil {
+			log.Fatal(err)
+		}
+		log.Printf("rendezvous listening on %s", conn.LocalAddr())
+		if i == len(addrs)-1 {
+			serve(conn)
+		} else {
+			go serve(conn)
 		}
 	}
 }
