@@ -1,7 +1,7 @@
 flowchart TD
   subgraph addr["① 寻址：知道往哪发"]
     reg["每 200ms 注册<br/>REG room id hosts"]
-    srv_see["服务器记下包的源地址<br/>= 本方 NAT 的映射（srflx）"]
+    srv_see["服务器记下包的源地址 = srflx<br/>并回执 YOU（punch 对等端不处理，p2pcp 用）"]
     exchange["双向交换地址<br/>PEER id pub hosts"]
     cands["组装候选<br/>pub + host + spray ±N"]
   end
@@ -40,3 +40,4 @@ flowchart TD
 %% @src rtt lab/punch/main.go s.send(fmt.Sprintf("PING %d"
 %% @src ka lab/punch/main.go s.send("KA", peer, 0)
 %% @src fail lab/punch/main.go log.Fatal("✘ 打洞超时
+%% @link punch_all 21-flow-symmetric.mmd

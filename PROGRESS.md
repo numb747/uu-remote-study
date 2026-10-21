@@ -86,8 +86,12 @@
   - 安全组放行 UDP 443 作为第二个好端口
   - 中转兜底
   - 断点续传
-  - App 新版（只取默认网络地址）还没装上手机
 - 详见 [09 第 8 节](docs/09-打洞传文件.md)。
+- 2026-10-21 复核：手机上装的 App 和 `apps/android/out/p2p-direct.apk` 哈希一致，新版早已装上。PC 走 Wi-Fi（公网 `110.228.186.81`），手机走电信 5G（CGNAT `27.128.48.52`），两端各跑一次 `p2pcp check`：PC 正常；手机又复现了 7000 的问题（映射 37890 → 37877）。用 bbr 2 条连接传 20MB，第一轮就打通，23.4Mbps，SRTT 约 440ms。
+
+### 0.5.8 端口转发：rsync 走打洞直连（2026-10-21）
+- 用 RustDesk 端口转发跑 rsync 备份，只有 3.4Mbps：两端都开着 sing-box TUN，RustDesk 报出去的地址是 `172.18.0.1`，打洞失败，退回 99-server 上的 hbbr 中继，被出方向 3M 卡死。
+- p2pcp 新增 `expose` / `forward`（`lab/p2pcp/tunnel.go`）：打洞后在 QUIC 上做 TCP 端口转发。ssh 管道实测约 167Mbps。退出时主动关闭连接，对端重启后 0.13 秒恢复（之前要等 31 秒的空闲超时）。打洞 + QUIC 接管收成 `dialPeer` / `acceptPeer`，传文件和隧道共用。用法见 [09 第 9 节](docs/09-打洞传文件.md)，ssh 别名 `monkey-p2p`。
 
 ### 0.6 换到有 IPv6 的新电脑后，第一步
 ```bash

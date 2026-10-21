@@ -1,0 +1,47 @@
+flowchart LR
+  user["用户"]
+  subgraph phone["手机 · App dev.uulab.p2p（5G 或 Wi-Fi）"]
+    app_ui["界面：选文件 / 分享 / 进度；换网重启接收<br/>MainActivity"]
+    app_core["p2pcp 核心（Go）<br/>伪装成 libp2pcp.so 才能执行"]
+    phone_dl["下载/P2P直传<br/>MediaStore"]
+  end
+  subgraph cloud["99-server 8.140.18.211"]
+    rdv["会合服务 uu-rendezvous，听 7000 + 7001<br/>只交换地址，不经手文件"]
+  end
+  nat_phone["运营商 CGNAT<br/>手机侧，有 IPv6 时并行打 IPv6"]
+  nat_pc["路由器 NAT<br/>电脑侧"]
+  subgraph pc["电脑"]
+    pc_entry["发送入口：启动器 / Dolphin 右键<br/>p2p-direct send"]
+    pc_svc["常驻接收：systemd 用户服务<br/>p2p-direct daemon"]
+    pc_core["p2pcp 核心（Go）<br/>~/.local/bin/p2pcp，-bind auto 每轮取物理网卡 IP"]
+    pc_dl["~/Downloads/P2P直传"]
+    notify["桌面通知<br/>notify-send"]
+  end
+  room_key["房间密钥<br/>~/.config/p2pcp/room"]
+
+  user -->|"分享 / 选文件"| app_ui
+  user -->|"右键 / 启动器"| pc_entry
+  app_ui -->|"ProcessBuilder：send / daemon，-lan 本机 IP 含 IPv6"| app_core
+  app_core -.->|"stdout：@STATE / @PROGRESS / @DONE"| app_ui
+  app_ui -->|"收完挪进公共下载"| phone_dl
+  pc_entry -->|"exec p2pcp send"| pc_core
+  pc_svc -->|"exec p2pcp daemon"| pc_core
+  pc_core -->|"写文件"| pc_dl
+  pc_core -.->|"进度 / 完成"| notify
+  room_key -.->|"p2p-direct 读取"| pc_svc
+  room_key -.->|"build.sh 写进 APK assets"| app_ui
+  app_core -->|UDP| nat_phone
+  pc_core -->|UDP| nat_pc
+  nat_phone -->|"① REG / PEER，UDP 7001 / 7000 轮换"| rdv
+  nat_pc -->|"① REG / PEER，UDP 7001 / 7000 轮换"| rdv
+  nat_phone <-->|"② 打洞 /PP /PA ③ QUIC 直连传文件（BBR，默认 2 条）"| nat_pc
+
+%% @src app_ui apps/android/src/dev/uulab/p2p/MainActivity.java public class MainActivity extends Activity
+%% @src app_core apps/android/src/dev/uulab/p2p/MainActivity.java cmd.add(getApplicationInfo().nativeLibraryDir + "/libp2pcp.so");
+%% @src rdv lab/punch/main.go func runServer
+%% @src pc_entry apps/pc/p2p-direct send)
+%% @src pc_svc apps/pc/install.sh ExecStart=%h/.local/bin/p2p-direct daemon
+%% @src pc_core apps/pc/install.sh -o ~/.local/bin/p2pcp ./p2pcp
+%% @link app_core 24-flow-p2pcp.mmd
+%% @link pc_core 24-flow-p2pcp.mmd
+%% @link rdv 20-flow-punch.mmd

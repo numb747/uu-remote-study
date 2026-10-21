@@ -1,15 +1,16 @@
 flowchart TD
-  setup["pcphone.sh setup<br/>PC 与手机同时起 natprobe peer"]
+  setup["pcphone.sh setup / xfer<br/>PC 与手机同时起 natprobe peer"]
   stun_q["各问一次 STUN，打印 MAPPED<br/>query"]
   stun_pub[公共 STUN 服务器]
   relay["脚本代替会合服务器<br/>把对方 MAPPED 写进 -file"]
   read_file["每 100ms 读 -file 得目标"]
   send_hi["每 interval 发 HI<br/>前 -warm 个用低 TTL"]
   nats["双方 NAT<br/>家宽 EIM+APDF / 5G CGNAT"]
-  recv_hi["收到 HI → 原样回 HIACK"]
+  recv_hi["收到 HI → 回 HIACK<br/>附上本机时间戳"]
   trigger["触发检查：首个 HI 进来就立刻回发<br/>-trigger"]
-  hiack["收到 HIACK = 双向打通<br/>算 RTT"]
-  summary["汇总：建连耗时、来源地址"]
+  hiack["收到 HIACK = 双向打通<br/>算 RTT 和时钟偏差（NTP 式，取最小 RTT 样本）"]
+  summary["汇总：建连耗时、来源地址、OFFSET"]
+  xfer_reuse["xfer 复用这两个固定端口跑视频流<br/>-local / -clock-offset"]
 
   setup -->|"PC() / PH()"| stun_q
   stun_q -->|"STUN Binding"| stun_pub
@@ -22,13 +23,15 @@ flowchart TD
   trigger -->|"HI t"| nats
   nats -->|"HIACK"| hiack
   hiack --> summary
+  summary -.->|"pcphone xfer：OFFSET 传给接收端"| xfer_reuse
 
 %% @src setup lab/real/pcphone.sh setup)
 %% @src stun_q lab/natprobe/peer.go fmt.Printf("%s MAPPED %s\n"
 %% @src relay lab/real/pcphone.sh give_pc() {
 %% @src read_file lab/natprobe/peer.go if b, err := os.ReadFile(*file)
 %% @src send_hi lab/natprobe/peer.go c.WriteToUDP(fmt.Appendf(nil, "HI %d %d", seq
-%% @src recv_hi lab/natprobe/peer.go c.WriteToUDP([]byte("HIACK "+f[1]+" "+f[2]), from)
+%% @src recv_hi lab/natprobe/peer.go c.WriteToUDP(fmt.Appendf(nil, "HIACK %s %s %d"
 %% @src trigger lab/natprobe/peer.go if *trigger && len(rtts) == 0
-%% @src hiack lab/natprobe/peer.go 首个 HIACK 来自
+%% @src hiack lab/natprobe/peer.go bestRTT, offset = rtt, time.Duration(peer-ns)-rtt/2
 %% @src summary lab/natprobe/peer.go == 汇总：发 HI
+%% @src xfer_reuse lab/real/pcphone.sh xfer) # 先用固定端口打洞

@@ -1,57 +1,68 @@
 flowchart LR
-  subgraph punch_pkg["lab/punch：会合 + 打洞"]
-    punch_server["会合服务器<br/>runServer"]
-    punch_peer["打洞对等端<br/>runPeer"]
-    host_cand["host 候选收集<br/>hostCandidates"]
-    punch_sock["可切换 TTL 的 socket<br/>sock.send"]
+  subgraph punch_pkg["lab/punch：会合 + 打洞实验"]
+    punch_server["会合服务器：多端口、房间共享、定期清理<br/>runServer（REG / UNREG → PEER / YOU）"]
+    punch_peer["打洞对等端 ×3<br/>runPeer / sock.send / hostCandidates"]
   end
   set_ttl["设置 IP_TTL ×2<br/>setTTL"]
   subgraph natprobe_pkg["lab/natprobe：NAT 画像"]
-    np_tests["画像测试 ×4<br/>runStun / runFilter / runTTL / runLife"]
-    np_server["配合服务端<br/>runServer"]
-    np_stun["最小 STUN 编解码<br/>query / bindingResponse"]
-    np_peer["手工打洞对等端<br/>runPeer"]
+    np_tests["画像测试 + 配合服务端 ×3<br/>runStun·Filter·TTL·Life / runServer / stun.go"]
+    np_peer["手工打洞对等端<br/>runPeer（RTT + 时钟偏差）"]
   end
   stunprobe["映射行为探测<br/>stunprobe"]
+  subgraph p2pcp_pkg["lab/p2pcp：打洞传文件"]
+    p2p_connect["会合（地址轮换 + 保活）+ 双栈打洞 + 提名；check 体检<br/>connect / connectOnce / check"]
+    p2p_xfer["QUIC 接管 socket + 传文件；退出时主动关连接<br/>dialPeer / acceptPeer / closeLive，send / recv（apernet/quic-go）"]:::changed
+    p2p_tunnel["端口转发：每个 TCP 连接一条 QUIC 流<br/>expose / forward / splice（tunnel.go）"]:::changed
+  end
+  hyscc["Hysteria 拥塞控制<br/>third_party/hyscc bbr / brutal"]
+  apps["P2P 直传软件 ×2<br/>安卓 App MainActivity / 电脑端 p2p-direct"]
   lab_sh["netns 实验室<br/>lab.sh"]
-  pcphone["PC ↔ 手机编排<br/>pcphone.sh"]
+  pcphone["PC ↔ 手机编排 ×2<br/>pcphone.sh / cc-bench.sh"]
   transport["传输层 ×3<br/>transport / fakeenc / xfer"]
   stun_pub[公共 STUN 服务器]
 
   punch_peer -->|"REG"| punch_server
   punch_server -->|"PEER"| punch_peer
-  punch_peer -->|调用| host_cand
-  punch_peer -->|"PUNCH / ACK / PING / KA"| punch_sock
-  punch_sock -->|调用| set_ttl
-  np_tests -->|"FILT / TTLA·B·C / LIFE"| np_server
-  np_tests -->|query| np_stun
+  punch_peer -->|"经 sock.send"| set_ttl
+  p2p_connect -->|"REG / UNREG"| punch_server
+  punch_server -->|"PEER / YOU"| p2p_connect
+  p2p_xfer -->|"dialPeer / acceptPeer 里调 connect，每条连接一次"| p2p_connect
+  p2p_tunnel -->|"dialPeer / acceptPeer"| p2p_xfer
+  p2p_tunnel -->|"applyCC（两端）"| hyscc
+  p2p_xfer -->|"applyCC（发送端，默认 bbr）"| hyscc
+  apps -->|"exec / ProcessBuilder 启动 send / daemon"| p2p_xfer
   np_tests -->|"runTTL 调用"| set_ttl
-  np_server -->|bindingResponse| np_stun
-  np_peer -->|query| np_stun
+  np_tests -->|"STUN Binding"| stun_pub
   np_peer -->|"低 TTL 预热"| set_ttl
-  np_stun -->|"STUN Binding"| stun_pub
+  np_peer -->|"STUN Binding"| stun_pub
   stunprobe -->|"STUN Binding"| stun_pub
   lab_sh -->|"ip netns exec … server"| punch_server
   lab_sh -->|"ip netns exec … peer"| punch_peer
   lab_sh -->|"run_xfer"| transport
   pcphone -->|"natprobe stun"| np_tests
   pcphone -->|"natprobe peer -file"| np_peer
+  pcphone -->|"xfer -local 复用打洞端口"| transport
+  pcphone -->|"cc-bench：本机 recv + adb 手机 send，逐组比拥塞控制"| p2p_xfer
 
 %% @src punch_server lab/punch/main.go func runServer
 %% @src punch_peer lab/punch/main.go func runPeer
-%% @src host_cand lab/punch/main.go func hostCandidates
-%% @src punch_sock lab/punch/main.go func (s *sock) send
 %% @src set_ttl lab/punch/ttl_unix.go func setTTL
 %% @src np_tests lab/natprobe/main.go func runStun
-%% @src np_server lab/natprobe/main.go func runServer
-%% @src np_stun lab/natprobe/stun.go func query
 %% @src np_peer lab/natprobe/peer.go func runPeer
 %% @src stunprobe lab/stunprobe/main.go func main()
+%% @src p2p_connect lab/p2pcp/main.go func connect(
+%% @src p2p_xfer lab/p2pcp/transfer.go func send(
+%% @src hyscc lab/third_party/hyscc/brutal/brutal.go func NewBrutalSender
+%% @src apps apps/pc/p2p-direct case ${1:-} in
+%% @src p2p_tunnel lab/p2pcp/tunnel.go func expose(
 %% @src lab_sh lab/netns/lab.sh main() {
 %% @src pcphone lab/real/pcphone.sh case $1 in
 %% @src transport lab/xfer/main.go func main()
 %% @link punch_peer 20-flow-punch.mmd
-%% @link punch_sock 21-flow-symmetric.mmd
 %% @link np_tests 22-flow-nat-profile.mmd
 %% @link np_peer 23-flow-manual-punch.mmd
+%% @link p2p_connect 24-flow-p2pcp.mmd
 %% @link lab_sh 30-netns-nat.mmd
+%% @link apps 31-p2p-direct.mmd
+%% @link p2p_tunnel 32-p2p-tunnel.mmd
+classDef changed stroke:#e0af68,stroke-width:3px,stroke-dasharray:7 4

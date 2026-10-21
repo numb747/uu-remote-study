@@ -1,31 +1,45 @@
 flowchart LR
-  researcher[研究者]
-  netns_lab["netns NAT 实验室<br/>lab/netns/lab.sh"]
-  real_lab["真实网络编排<br/>lab/real/pcphone.sh"]
-  holepunch["打洞工具集 ×3<br/>punch / natprobe / stunprobe"]
-  transport["传输层实验 ×3<br/>transport / fakeenc / xfer"]
-  nft["Linux nftables + conntrack<br/>模拟出来的 NAT"]
+  researcher["用户 / 研究者"]
+  subgraph product["已落地：P2P 直传"]
+    apps["P2P 直传软件 ×2<br/>安卓 App + 电脑常驻服务（换网自动恢复）"]
+    p2pcp["打洞直连核心<br/>lab/p2pcp：传文件 + 端口转发 expose / forward（双栈打洞 + QUIC + BBR）"]:::changed
+    rdv["会合服务器 8.140.18.211:7000+7001<br/>uu-rendezvous，一个进程听两个端口、房间共享"]
+  end
+  subgraph lab["研究实验室"]
+    netns_lab["netns NAT 实验室<br/>lab.sh + nftables / conntrack 模拟 NAT"]
+    real_lab["真实网络编排 ×2<br/>lab/real/pcphone.sh / cc-bench.sh"]
+    holepunch["打洞实验工具 ×3<br/>punch / natprobe / stunprobe"]
+    transport["传输层实验 ×3<br/>transport / fakeenc / xfer"]
+  end
   real_nat["真实 NAT<br/>家宽路由 / 运营商 CGNAT"]
   stun_pub[公共 STUN 服务器]
-  phone["安卓手机<br/>5G 网络，adb 调试"]
 
+  researcher -->|"点发送 / 常驻接收"| apps
+  apps -->|"启动 p2pcp send / daemon"| p2pcp
+  researcher -->|"rsync / ssh 经 forward 端口"| p2pcp
+  p2pcp -->|"UDP 穿过：打洞 + QUIC 直连"| real_nat
+  real_nat -->|"REG·UNREG / PEER·YOU"| rdv
   researcher -->|"运行 run / matrix"| netns_lab
   researcher -->|运行| real_lab
   netns_lab -->|"go build，ip netns exec"| holepunch
   netns_lab -->|"运行 xfer"| transport
-  netns_lab -->|"写 NAT 规则"| nft
-  holepunch -->|"UDP 穿过（实验室）"| nft
-  real_lab -->|"运行 natprobe"| holepunch
-  real_lab -->|"adb push / adb shell"| phone
+  real_lab -->|"natprobe（PC + adb 手机）"| holepunch
+  real_lab -->|"cc-bench：比拥塞控制 × 连接数"| p2pcp
+  real_lab -->|"xfer 复用打洞端口"| transport
   holepunch -->|"UDP 穿过（真实网络）"| real_nat
-  phone -->|"UDP 穿过"| real_nat
   real_nat -->|"STUN Binding"| stun_pub
 
+%% @src apps apps/pc/p2p-direct case ${1:-} in
+%% @src p2pcp lab/p2pcp/main.go func main()
+%% @src rdv lab/punch/main.go func runServer
 %% @src netns_lab lab/netns/lab.sh main() {
 %% @src real_lab lab/real/pcphone.sh case $1 in
 %% @src holepunch lab/punch/main.go func main()
 %% @src transport lab/xfer/main.go func main()
+%% @link apps 31-p2p-direct.mmd
+%% @link p2pcp 24-flow-p2pcp.mmd
 %% @link holepunch 10-modules.mmd
 %% @link netns_lab 30-netns-nat.mmd
 %% @link real_lab 23-flow-manual-punch.mmd
-%% @commit 6b8cbe2
+%% @commit a85cb98+dirty
+classDef changed stroke:#e0af68,stroke-width:3px,stroke-dasharray:7 4

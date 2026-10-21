@@ -90,6 +90,84 @@ func answerPunch(ctx context.Context, tr *quic.Transport) {
 	}
 }
 
+// takeOver 让 QUIC 接管打通的 socket，后台继续回应迟到的打洞探测；release 回收 socket。
+func takeOver(s *session) (tr *quic.Transport, release func()) {
+	tr = &quic.Transport{Conn: s.conn}
+	ctx, cancel := context.WithCancel(context.Background())
+	go answerPunch(ctx, tr)
+	return tr, func() { cancel(); tr.Close() }
+}
+
+// live 是所有活着的 QUIC 连接。进程收到 SIGTERM / SIGINT 时逐个主动关闭（closeLive），
+// 对方马上就知道，不用等 30 秒空闲超时（隧道断了重连从 31 秒缩到 1 秒以内，docs/09 第 9 节）
+var live sync.Map
+
+// adopt 登记 conn；连接结束时注销并回收它独占的 socket。
+func adopt(conn *quic.Conn, release func()) {
+	live.Store(conn, struct{}{})
+	go func() {
+		<-conn.Context().Done()
+		live.Delete(conn)
+		release()
+	}()
+}
+
+func closeLive() {
+	live.Range(func(k, _ any) bool {
+		k.(*quic.Conn).CloseWithError(0, "对方退出")
+		return true
+	})
+}
+
+// dialPeer 以发送端身份在 room 里打洞，然后在同一个 socket 上 QUIC Dial。
+func dialPeer(o opts, room, alpn string) (*quic.Conn, *session, error) {
+	s, err := connect(o, room, "send")
+	if err != nil {
+		return nil, nil, err
+	}
+	tr, release := takeOver(s)
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	conn, err := tr.Dial(ctx, s.peer, &tls.Config{InsecureSkipVerify: true, NextProtos: []string{alpn}}, quicConf())
+	if err != nil {
+		release()
+		return nil, s, fmt.Errorf("打通 %s 后 QUIC 握手: %w", s.peer, err)
+	}
+	adopt(conn, release)
+	return conn, s, nil
+}
+
+// acceptPeer 以接收端身份在 room 里打洞，然后在同一个 socket 上等对方 QUIC Dial 过来。
+func acceptPeer(o opts, room string, tc *tls.Config) (*quic.Conn, *session, error) {
+	s, err := connect(o, room, "recv")
+	if err != nil {
+		return nil, nil, err
+	}
+	tr, release := takeOver(s)
+	ln, err := tr.Listen(tc, quicConf())
+	if err != nil {
+		release()
+		return nil, s, err
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+	conn, err := ln.Accept(ctx)
+	if err != nil {
+		release()
+		return nil, s, fmt.Errorf("打通 %s 后等 QUIC 连接: %w", s.peer, err)
+	}
+	adopt(conn, release)
+	return conn, s, nil
+}
+
+// partErr：打通之后的错误带上连接序号；没打通的（connect 的分层诊断）原样返回，各条连接报的是同一件事
+func partErr(i int, s *session, err error) error {
+	if s == nil {
+		return err
+	}
+	return fmt.Errorf("[%d] %w", i, err)
+}
+
 func roomOf(o opts, i int) string { return fmt.Sprintf("%s.%d", o.room, i) }
 
 func statsLine(c *quic.Conn) string {
@@ -196,30 +274,19 @@ func cmp(a, b error) error {
 }
 
 func sendPart(o opts, f *os.File, h header, mu *sync.Mutex, start *time.Time, m *meter) error {
-	s, err := connect(o, roomOf(o, int(h.idx)), "send")
+	conn, s, err := dialPeer(o, roomOf(o, int(h.idx)), alpn)
 	if err != nil {
-		return err
+		return partErr(int(h.idx), s, err)
 	}
+	defer conn.CloseWithError(0, "")
 	log.Printf("[%d] 打通 %s，用时 %v", h.idx, s.peer, s.took.Round(time.Millisecond))
 	if h.idx == 0 {
 		o.rep.state("已打通 " + s.peer.String())
 	}
-	tr := &quic.Transport{Conn: s.conn}
-	defer tr.Close()
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-	go answerPunch(ctx, tr)
-
-	dctx, dcancel := context.WithTimeout(ctx, 10*time.Second)
-	defer dcancel()
-	conn, err := tr.Dial(dctx, s.peer, &tls.Config{InsecureSkipVerify: true, NextProtos: []string{alpn}}, quicConf())
-	if err != nil {
-		return fmt.Errorf("[%d] QUIC 握手: %w", h.idx, err)
-	}
-	defer conn.CloseWithError(0, "")
 	if err := applyCC(conn, o.cc); err != nil {
 		return err
 	}
+	ctx := context.Background()
 	str, err := conn.OpenStreamSync(ctx)
 	if err != nil {
 		return err
@@ -287,31 +354,16 @@ func recv(o opts) error {
 		if i > 0 {
 			po.timeout, po.regEvery = 30*time.Second, 500*time.Millisecond
 		}
-		s, err := connect(po, roomOf(o, i), "recv")
+		conn, s, err := acceptPeer(po, roomOf(o, i), tc)
 		if err != nil {
-			return err
+			return partErr(i, s, err)
 		}
+		defer conn.CloseWithError(0, "")
 		log.Printf("[%d] 打通 %s，用时 %v", i, s.peer, s.took.Round(time.Millisecond))
 		if i == 0 {
 			o.rep.state("已打通 " + s.peer.String())
 		}
-		tr := &quic.Transport{Conn: s.conn}
-		defer tr.Close()
-		ctx, cancel := context.WithCancel(context.Background())
-		defer cancel()
-		go answerPunch(ctx, tr)
-		ln, err := tr.Listen(tc, quicConf())
-		if err != nil {
-			return err
-		}
-		actx, acancel := context.WithTimeout(ctx, 15*time.Second)
-		defer acancel()
-		conn, err := ln.Accept(actx)
-		if err != nil {
-			return fmt.Errorf("[%d] 等 QUIC 连接: %w", i, err)
-		}
-		defer conn.CloseWithError(0, "")
-		str, err := conn.AcceptStream(ctx)
+		str, err := conn.AcceptStream(context.Background())
 		if err != nil {
 			return err
 		}

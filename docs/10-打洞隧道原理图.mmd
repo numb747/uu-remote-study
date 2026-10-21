@@ -1,0 +1,51 @@
+flowchart TB
+  subgraph q1["① 为什么之前慢：数据绕了远路"]
+    direction LR
+    a_pc["本机<br/>Wi-Fi，出口 110.228.186.81"]
+    a_relay["99-server 上的 RustDesk 中继 hbbr<br/>出方向固定 3Mbps"]
+    a_peer["对端 monkey<br/>家宽，出口 183.197.45.114"]
+    a_pc -->|"RustDesk 打洞失败：报给对方的地址是<br/>sing-box TUN 的 172.18.0.1，对方根本打不到"| a_relay
+    a_relay -->|"3.4Mbps：48GB 要 31 小时"| a_peer
+  end
+
+  subgraph q2["② 怎么打通：先交换地址（寻址），再同时出门（放行）"]
+    direction LR
+    b_pc["本机 UDP socket<br/>内网 192.168.1.95:p"]
+    b_rdv["会合服务器 8.140.18.211:7001<br/>像一面镜子 + 传话人"]
+    b_peer["对端 UDP socket<br/>内网 192.168.0.10:q"]
+    b_pc -->|"REG：我在房间里<br/>服务器看到 110.228.186.81:P"| b_rdv
+    b_peer -->|"REG：我也在<br/>服务器看到 183.197.45.114:Q"| b_rdv
+    b_rdv -.->|"PEER：互相告诉对方的公网地址"| b_pc
+    b_rdv -.->|PEER| b_peer
+    b_pc <-->|"同时互发打洞包 /PP<br/>各自的 NAT 记下「我往那儿发过」，对方回来的包就放行"| b_peer
+  end
+
+  subgraph q3["③ 打通之后：一层套一层，各管一件事"]
+    direction LR
+    c_rsync["rsync 发送端<br/>比对文件，只传缺的"]
+    c_ssh["ssh<br/>加密 + 认证"]
+    c_fwd["forward<br/>一个 TCP 连接 = 一条 QUIC 流"]
+    c_hole["两层 NAT 上的洞<br/>只放行这对 UDP 地址之间的包"]
+    c_exp["expose<br/>一条 QUIC 流 = 一个 TCP 连接"]
+    c_sshd["sshd 127.0.0.1:22"]
+    c_rsync2["rsync 接收端<br/>写盘"]
+    c_rsync -->|"字节流"| c_ssh
+    c_ssh -->|"TCP 127.0.0.1:2223<br/>只在本机内部"| c_fwd
+    c_fwd -->|"QUIC：可靠、有序、BBR 拥塞控制<br/>必须跑在打洞的同一个 socket 上"| c_hole
+    c_hole -->|"UDP 直连，RTT 约 22ms"| c_exp
+    c_exp -->|"TCP 127.0.0.1:22<br/>只在对端内部"| c_sshd
+    c_sshd --> c_rsync2
+  end
+
+  subgraph q4["④ 断了怎么办：三层各管一段"]
+    direction LR
+    d_notify["通知：进程退出前发 CONNECTION_CLOSE<br/>对方 0.1 秒内知道<br/>（断网来不及发，就靠 30 秒空闲超时）"]
+    d_conn["连接：forward 发现 QUIC 断了<br/>下一个 TCP 连接进来时重新会合、打洞<br/>约 0.1 秒"]
+    d_file["文件：rsync 循环重连<br/>跳过已传完的文件，半截的接着传"]
+    d_notify -->|"让下一层尽早动手"| d_conn
+    d_conn -->|"ssh 断了，rsync 退出重来"| d_file
+  end
+
+  q1 -->|"改走直连：110Mbps 以上，快 30 多倍"| q2
+  q2 -->|"洞打通之后"| q3
+  q3 -->|"网络总会断"| q4

@@ -4,6 +4,8 @@
 //	p2pcp daemon -room demo [-o 目录]              常驻：收完一个接着等下一个
 //	p2pcp send   -room demo [-conns 2] 文件...     发送（多个文件依次发）
 //	p2pcp check                                   网络体检：会合端口通不通、有没有"毒端口"、NAT 映射、IPv6（check.go）
+//	p2pcp expose  -room demo [-to 127.0.0.1:22]       常驻：把本机一个 TCP 端口经打洞暴露给对方（tunnel.go）
+//	p2pcp forward -room demo [-listen 127.0.0.1:2223] 本机端口转发到 expose 那端，比如 rsync 走 ssh -p 2223
 //
 // 会合服务器就是 punch server（REG/PEER/UNREG 协议）。-conns N 会打 N 个洞、开 N 条 QUIC 连接，各传文件的一段。
 // 默认拥塞控制是 Hysteria 的 BBR（cc.go）：5G 上的乱序会被 Cubic 误判成丢包，Cubic 时代要靠 4 条连接才能跑满，
@@ -25,9 +27,11 @@ import (
 	"log"
 	"net"
 	"os"
+	"os/signal"
 	"strings"
 	"sync"
 	"sync/atomic"
+	"syscall"
 	"time"
 )
 
@@ -65,6 +69,8 @@ type opts struct {
 	conns    int
 	cc       string
 	out      string
+	to       string        // expose：转发目标
+	listen   string        // forward：本地监听地址
 	timeout  time.Duration // 等对方的超时，0 = 一直等（daemon）
 	regEvery time.Duration // 注册间隔
 	rep      *reporter
@@ -75,7 +81,9 @@ func main() {
 		usage()
 	}
 	role := os.Args[1]
-	if role != "send" && role != "recv" && role != "daemon" && role != "check" {
+	switch role {
+	case "send", "recv", "daemon", "check", "expose", "forward":
+	default:
 		usage()
 	}
 	fs := flag.NewFlagSet(role, flag.ExitOnError)
@@ -90,6 +98,8 @@ func main() {
 	fs.IntVar(&o.conns, "conns", 2, "发送端：并行连接数（每条各打一个洞；BBR 下 1~2 条就能跑满，docs/09 第 7 节）")
 	fs.StringVar(&o.cc, "cc", "bbr", "发送端：拥塞控制 bbr | cubic | brutal:45M（见 cc.go）")
 	fs.StringVar(&o.out, "o", ".", "接收端：保存目录")
+	fs.StringVar(&o.to, "to", "127.0.0.1:22", "expose：对方开的每条流都接到这个 TCP 地址")
+	fs.StringVar(&o.listen, "listen", "127.0.0.1:2223", "forward：本地监听地址")
 	fs.DurationVar(&o.timeout, "timeout", 60*time.Second, "等对方的超时（daemon 模式下无效）")
 	progress := fs.Bool("progress", false, "在 stdout 输出机器可读的进度行")
 	notify := fs.Bool("notify", false, "用 notify-send 弹桌面通知")
@@ -97,6 +107,7 @@ func main() {
 	log.SetFlags(log.Ltime | log.Lmicroseconds)
 	o.rep = &reporter{machine: *progress, notify: *notify}
 	o.regEvery = 500 * time.Millisecond
+	exitGracefully()
 
 	var err error
 	switch role {
@@ -113,29 +124,12 @@ func main() {
 		err = recv(o)
 	case "check":
 		err = check(o)
+	case "expose":
+		err = expose(o)
+	case "forward":
+		err = forward(o)
 	case "daemon":
-		// 常驻：5 秒注册一次就够了（家用路由器映射寿命 60 秒以上，docs/08）。对方一注册，服务器会立刻把 PEER 推过来
-		o.timeout, o.regEvery = 0, 5*time.Second
-		backoff := time.Duration(0)
-		for {
-			o.rep.state("等待对方发送")
-			err := recv(o)
-			switch {
-			case err == nil:
-				backoff = 0
-			case errors.Is(err, errNoRendezvous):
-				// 空等时连不上会合服务器（断网、换网络、服务器重启）：没人在传，不弹失败通知，只更新状态，
-				// 重试间隔从 5 秒拉长到 1 分钟，网络回来后最多一分钟内自己恢复
-				backoff = min(max(2*backoff, 5*time.Second), time.Minute)
-				log.Print(err)
-				o.rep.state(fmt.Sprintf("连不上会合服务器，%v 后重试", backoff))
-				time.Sleep(backoff)
-			default:
-				backoff = 0
-				o.rep.fail(err)
-				time.Sleep(time.Second)
-			}
-		}
+		keepServing(o, "等待对方发送", recv)
 	}
 	if err != nil {
 		o.rep.fail(err)
@@ -143,8 +137,47 @@ func main() {
 	}
 }
 
+// keepServing 常驻（daemon、expose）：一轮结束（收完一个文件 / 隧道断开）就重新在房间里等。
+// 5 秒注册一次就够了（家用路由器映射寿命 60 秒以上，docs/08）。对方一注册，服务器会立刻把 PEER 推过来
+func keepServing(o opts, waiting string, once func(opts) error) {
+	o.timeout, o.regEvery = 0, 5*time.Second
+	backoff := time.Duration(0)
+	for {
+		o.rep.state(waiting)
+		err := once(o)
+		switch {
+		case err == nil:
+			backoff = 0
+		case errors.Is(err, errNoRendezvous):
+			// 空等时连不上会合服务器（断网、换网络、服务器重启）：没人在用，不弹失败通知，只更新状态，
+			// 重试间隔从 5 秒拉长到 1 分钟，网络回来后最多一分钟内自己恢复
+			backoff = min(max(2*backoff, 5*time.Second), time.Minute)
+			log.Print(err)
+			o.rep.state(fmt.Sprintf("连不上会合服务器，%v 后重试", backoff))
+			time.Sleep(backoff)
+		default:
+			backoff = 0
+			o.rep.fail(err)
+			time.Sleep(time.Second)
+		}
+	}
+}
+
+// exitGracefully：收到 SIGTERM / SIGINT 先主动关掉所有 QUIC 连接（closeLive），再按原信号退出，
+// systemd、App（Process.destroy）看到的退出方式不变
+func exitGracefully() {
+	sig := make(chan os.Signal, 1)
+	signal.Notify(sig, syscall.SIGTERM, os.Interrupt)
+	go func() {
+		s := <-sig
+		closeLive()
+		signal.Reset()
+		syscall.Kill(os.Getpid(), s.(syscall.Signal))
+	}()
+}
+
 func usage() {
-	fmt.Println("usage: p2pcp send|recv|daemon|check [flags] [文件...]")
+	fmt.Println("usage: p2pcp send|recv|daemon|check|expose|forward [flags] [文件...]")
 	os.Exit(2)
 }
 
