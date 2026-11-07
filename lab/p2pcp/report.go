@@ -50,9 +50,14 @@ func (r *reporter) progress(dir string, done, total uint64, mbps float64, name s
 	r.desktop(fmt.Sprintf("%s %s", verb(dir), name), fmt.Sprintf("%.1f / %.1f MB　%.1f Mbps", float64(done)/1e6, float64(total)/1e6, mbps), pct)
 }
 
-func (r *reporter) done(dir string, size uint64, el time.Duration, path string) {
-	mbps := float64(size) * 8 / el.Seconds() / 1e6
-	log.Printf("%s完成：%s  %.1fMB 用时 %v，平均 %.1f Mbps（%.2f MB/s）", verb(dir), path, float64(size)/1e6, el.Round(time.Millisecond), mbps, float64(size)/el.Seconds()/1e6)
+// done：size 是文件大小，sent 是这次真正传的字节（续传时比 size 小），速度按 sent 算
+func (r *reporter) done(dir string, size, sent uint64, el time.Duration, path string) {
+	mbps := float64(sent) * 8 / el.Seconds() / 1e6
+	resumed := ""
+	if sent < size {
+		resumed = fmt.Sprintf("（续传，这次传了 %.1fMB）", float64(sent)/1e6)
+	}
+	log.Printf("%s完成：%s  %.1fMB%s 用时 %v，平均 %.1f Mbps（%.2f MB/s）", verb(dir), path, float64(size)/1e6, resumed, el.Round(time.Millisecond), mbps, float64(sent)/el.Seconds()/1e6)
 	r.line("@DONE %s %d %.3f %.1f %s", dir, size, el.Seconds(), mbps, path)
 	r.desktop(fmt.Sprintf("%s完成 %s", verb(dir), shortName(path)),
 		fmt.Sprintf("%.1f MB，用时 %.1f 秒，平均 %.1f Mbps", float64(size)/1e6, el.Seconds(), mbps), -1)

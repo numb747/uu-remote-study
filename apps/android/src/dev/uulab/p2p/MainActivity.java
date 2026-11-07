@@ -229,6 +229,10 @@ public class MainActivity extends Activity {
         new Thread(() -> {
             File outbox = new File(getCacheDir(), "outbox");
             outbox.mkdirs();
+            // p2pcp 要真实路径（多条连接各读一段），所以先从 content:// 复制到缓存，本机复制很快。
+            // 全部复制完再一次交给 p2pcp：一次打洞发完所有文件，中途断了它自己重连续传
+            List<String> args = new ArrayList<>(List.of("send", "-room", room + ".pc"));
+            List<File> tmps = new ArrayList<>();
             for (Uri u : uris) {
                 String name = displayName(u);
                 post(() -> {
@@ -237,7 +241,6 @@ public class MainActivity extends Activity {
                     sendPanel.bar.setProgress(0);
                     sendPanel.detail.setText("");
                 });
-                // p2pcp 要一个真实路径（多条连接各读一段），所以先从 content:// 复制到缓存，本机复制很快
                 File tmp = new File(outbox, name);
                 try (InputStream is = getContentResolver().openInputStream(u); OutputStream os = new FileOutputStream(tmp)) {
                     copy(is, os);
@@ -245,9 +248,11 @@ public class MainActivity extends Activity {
                     post(() -> sendPanel.handle("@ERROR 读取文件失败：" + e.getMessage()));
                     continue;
                 }
-                run(sendPanel, "send", "-room", room + ".pc", tmp.getAbsolutePath());
-                tmp.delete();
+                tmps.add(tmp);
+                args.add(tmp.getAbsolutePath());
             }
+            if (!tmps.isEmpty()) run(sendPanel, args.toArray(new String[0]));
+            for (File f : tmps) f.delete();
         }).start();
     }
 

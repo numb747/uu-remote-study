@@ -1,8 +1,8 @@
 // punch: 最小化的 UDP 打洞实验 —— 一个会合(rendezvous)服务器 + 两个对等端。
-// 这就是 ICE/UU远程/RustDesk/Tailscale 打洞的核心骨架，去掉了加密、认证与 TURN 中继。
+// 这就是 ICE/UU远程/RustDesk/Tailscale 打洞的核心骨架，去掉了加密和认证；server 带一个最简单的中继（-relay）。
 //
 //	服务器 (需要公网 IP，例如一台 VPS):
-//	  go run . server -listen :7000          （可以听多个端口，房间共享：-listen :7000,:7001）
+//	  go run . server -listen :7000          （可以听多个端口，房间共享：-listen :7000,:7001；-relay :3478 开中继）
 //	两个对等端 (分别在两个不同 NAT 后面):
 //	  go run . peer -server VPS:7000 -room demo -id A
 //	  go run . peer -server VPS:7000 -room demo -id B
@@ -54,11 +54,74 @@ func main() {
 }
 
 // ---------------- rendezvous server ----------------
+//
+// 两版协议同时支持，房间互不相通：
+//
+//	v1（punch peer、旧版 p2pcp）纯文本：REG/UNREG → YOU/PEER，同一房间里所有人两两配对
+//	v2（p2pcp）每条报文以 "/" 开头，这样 QUIC 接管 socket 之后，客户端还能经 ReadNonQUICPacket 收到（连接迁移要用）：
+//	  → /R2 <房间号> <角色.随机数> <候选|-> <标志|->     /U2 <房间号> <id>
+//	  ← /Y <公网映射>     /P <对方 id> <对方公网映射> <对方候选|-> <对方标志|->
+//	  只给角色（id 里 "." 前面那段）不同的两人配对：同一房间可以有多个发送端，它们之间不互相打洞
+//
+// 中继（-relay，默认 UDP 3478）：两端在打洞失败后各发 /L <中继键> <d|l>，凑齐两端后回 /LK，此后从一端来的包原样转给另一端。
+// 中继只是转发 UDP，QUIC 的加密和认证仍在两端之间（p2pcp auth.go），服务器看不到内容。
 
 type member struct {
 	pub, lan string
+	flags    string // v2：对方要求的方式，比如 relay
 	seen     time.Time
 	conn     *net.UDPConn // 它是从哪个监听端口进来的：回包必须从同一个端口发，否则过不了对方 NAT 的过滤
+}
+
+// role：v2 的 id 是 "角色.随机数"，v1 的 id 整个就是角色（两两配对，只要 id 不同）
+func role(id string) string {
+	r, _, _ := strings.Cut(id, ".")
+	return r
+}
+
+// limiter 按源 IP 限速：会合和中继的控制报文每秒 20 个、突发 60 个，挡住刷房间、借服务器反射流量
+type limiter struct {
+	mu sync.Mutex
+	m  map[string]*bucket
+}
+
+type bucket struct {
+	tokens float64
+	last   time.Time
+	warned bool
+}
+
+func (l *limiter) allow(ip net.IP) bool {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	now := time.Now()
+	k := ip.String()
+	b := l.m[k]
+	if b == nil {
+		b = &bucket{tokens: 60, last: now}
+		l.m[k] = b
+	}
+	b.tokens = min(60, b.tokens+now.Sub(b.last).Seconds()*20)
+	b.last = now
+	if b.tokens < 1 {
+		if !b.warned {
+			b.warned = true
+			log.Printf("限速 %s：控制报文超过每秒 20 个", k)
+		}
+		return false
+	}
+	b.tokens--
+	return true
+}
+
+func (l *limiter) gc() {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	for k, b := range l.m {
+		if time.Since(b.last) > time.Minute {
+			delete(l.m, k)
+		}
+	}
 }
 
 // runServer 可以同时听多个端口（-listen :7000,:7001），房间是共享的：两端从不同端口注册也能配上对。
@@ -66,11 +129,13 @@ type member struct {
 func runServer(args []string) {
 	fs := flag.NewFlagSet("server", flag.ExitOnError)
 	listen := fs.String("listen", ":7000", "UDP 监听地址，逗号分隔可以听多个")
+	relay := fs.String("relay", "", "中继 UDP 监听地址，如 :3478（空 = 不开中继）")
 	fs.Parse(args)
 
 	var (
 		mu    sync.Mutex
 		rooms = map[string]map[string]*member{}
+		lim   = &limiter{m: map[string]*bucket{}}
 	)
 	// 清理：会合只在头几秒有用，5 分钟没再注册的成员、空房间都删掉，常驻服务的内存才不会一直涨
 	go func() {
@@ -87,8 +152,38 @@ func runServer(args []string) {
 				}
 			}
 			mu.Unlock()
+			lim.gc()
 		}
 	}()
+
+	// register 记下成员并和房间里的其他人互换地址。peer 生成发给某一方的 PEER 报文
+	register := func(conn *net.UDPConn, from *net.UDPAddr, room, id, lan, flags string, peer func(id, pub, lan, flags string) string) {
+		mu.Lock()
+		defer mu.Unlock()
+		if rooms[room] == nil {
+			rooms[room] = map[string]*member{}
+		}
+		m := rooms[room]
+		if old, ok := m[id]; !ok || old.pub != from.String() {
+			// 服务器看到的源地址 = 对方 NAT 分配的公网映射，这正是 STUN 做的事。
+			// v2 的房间号是房间名的 HMAC，日志里不会出现房间名
+			log.Printf("room=%s id=%s pub=%s lan=%s flags=%s via=%s", room, id, from, lan, flags, conn.LocalAddr())
+		}
+		m[id] = &member{pub: from.String(), lan: lan, flags: flags, seen: time.Now(), conn: conn}
+		for oid, o := range m {
+			if role(oid) == role(id) || time.Since(o.seen) > 30*time.Second {
+				continue
+			}
+			// 双向交换：两边几乎同时拿到对方地址，同时开始往外发包 —— "同时打开"
+			conn.WriteToUDP([]byte(peer(oid, o.pub, o.lan, o.flags)), from)
+			o.conn.WriteToUDP([]byte(peer(id, from.String(), lan, flags)), mustResolve(o.pub))
+		}
+	}
+	unregister := func(room, id string) { // 已经拿到对方地址，别再把自己推给后来者
+		mu.Lock()
+		delete(rooms[room], id)
+		mu.Unlock()
+	}
 
 	serve := func(conn *net.UDPConn) {
 		buf := make([]byte, 1500)
@@ -97,39 +192,31 @@ func runServer(args []string) {
 			if err != nil {
 				continue
 			}
+			if !lim.allow(from.IP) {
+				continue
+			}
 			f := strings.Fields(string(buf[:n]))
-			if len(f) == 3 && f[0] == "UNREG" { // 已经拿到对方地址，别再把自己推给后来者
-				mu.Lock()
-				delete(rooms[f[1]], f[2])
-				mu.Unlock()
-				continue
+			switch {
+			case len(f) == 3 && f[0] == "UNREG":
+				unregister(f[1], f[2])
+			case len(f) == 4 && f[0] == "REG":
+				// 告诉对方它的公网映射：客户端据此发现"分到的端口进不来"（比如运营商 CGNAT 分了被拦截的低端口，docs/09）
+				conn.WriteToUDP([]byte("YOU "+from.String()), from)
+				register(conn, from, f[1], f[2], f[3], "", func(id, pub, lan, _ string) string {
+					return fmt.Sprintf("PEER %s %s %s", id, pub, lan)
+				})
+			case len(f) == 3 && f[0] == "/U2":
+				unregister("v2|"+f[1], f[2])
+			case len(f) == 5 && f[0] == "/R2" && len(f[1]) <= 64 && len(f[2]) <= 40:
+				conn.WriteToUDP([]byte("/Y "+from.String()), from)
+				register(conn, from, "v2|"+f[1], f[2], f[3], f[4], func(id, pub, lan, flags string) string {
+					return fmt.Sprintf("/P %s %s %s %s", id, pub, lan, flags)
+				})
 			}
-			if len(f) != 4 || f[0] != "REG" {
-				continue
-			}
-			room, id, lan := f[1], f[2], f[3]
-			// 告诉对方它的公网映射：客户端据此发现"分到的端口进不来"（比如运营商 CGNAT 分了被拦截的低端口，docs/09）
-			conn.WriteToUDP([]byte("YOU "+from.String()), from)
-			mu.Lock()
-			if rooms[room] == nil {
-				rooms[room] = map[string]*member{}
-			}
-			m := rooms[room]
-			if old, ok := m[id]; !ok || old.pub != from.String() {
-				// 服务器看到的源地址 = 对方 NAT 分配的公网映射，这正是 STUN 做的事
-				log.Printf("room=%s id=%s pub=%s lan=%s via=%s", room, id, from, lan, conn.LocalAddr())
-			}
-			m[id] = &member{pub: from.String(), lan: lan, seen: time.Now(), conn: conn}
-			for oid, o := range m {
-				if oid == id || time.Since(o.seen) > 30*time.Second {
-					continue
-				}
-				// 双向交换：两边几乎同时拿到对方地址，同时开始往外发包 —— "同时打开"
-				conn.WriteToUDP([]byte(fmt.Sprintf("PEER %s %s %s", oid, o.pub, o.lan)), from)
-				o.conn.WriteToUDP([]byte(fmt.Sprintf("PEER %s %s %s", id, from, lan)), mustResolve(o.pub))
-			}
-			mu.Unlock()
 		}
+	}
+	if *relay != "" {
+		go runRelay(*relay, lim)
 	}
 	addrs := strings.Split(*listen, ",")
 	for i, a := range addrs {
@@ -142,6 +229,109 @@ func runServer(args []string) {
 			serve(conn)
 		} else {
 			go serve(conn)
+		}
+	}
+}
+
+// relaySess 是一对中继端点：d = 发起连接的一端，l = 等连接的一端
+type relaySess struct {
+	key    string
+	d, l   *net.UDPAddr
+	seen   time.Time
+	paired bool
+}
+
+// runRelay 打洞兜底：凑齐一对就互相转发。服务器出方向只有 3M（PROGRESS 0.4），中继只保证"连得上"，
+// 够 ssh 交互、不够传大文件；连上之后 p2pcp 会在后台继续尝试打洞，打通了就把连接迁移到直连上（tunnel.go）
+func runRelay(addr string, lim *limiter) {
+	conn, err := net.ListenUDP("udp", mustResolve(addr))
+	if err != nil {
+		log.Fatal(err)
+	}
+	log.Printf("relay listening on %s", conn.LocalAddr())
+	var (
+		mu       sync.Mutex
+		sessions = map[string]*relaySess{}
+		byAddr   = map[string]*relaySess{} // 端点地址 → 所在的一对
+	)
+	go func() {
+		for range time.Tick(30 * time.Second) {
+			mu.Lock()
+			for k, s := range sessions {
+				if time.Since(s.seen) > time.Minute { // 两边都没包了：连接已经关了或者迁到直连上了
+					delete(sessions, k)
+					for _, a := range []*net.UDPAddr{s.d, s.l} {
+						if a != nil && byAddr[a.String()] == s {
+							delete(byAddr, a.String())
+						}
+					}
+					log.Printf("relay %s 结束", k)
+				}
+			}
+			mu.Unlock()
+		}
+	}()
+	buf := make([]byte, 2048)
+	for {
+		n, from, err := conn.ReadFromUDP(buf)
+		if err != nil {
+			continue
+		}
+		if n > 3 && string(buf[:3]) == "/L " {
+			if !lim.allow(from.IP) {
+				continue
+			}
+			f := strings.Fields(string(buf[:n]))
+			if len(f) != 3 || len(f[1]) > 128 || f[2] != "d" && f[2] != "l" {
+				continue
+			}
+			mu.Lock()
+			s := sessions[f[1]]
+			if s == nil {
+				if len(sessions) >= 256 {
+					mu.Unlock()
+					continue
+				}
+				s = &relaySess{key: f[1]}
+				sessions[f[1]] = s
+			}
+			end := &s.d
+			if f[2] == "l" {
+				end = &s.l
+			}
+			if *end == nil || (*end).String() != from.String() {
+				if *end != nil {
+					delete(byAddr, (*end).String())
+				}
+				*end = from
+				byAddr[from.String()] = s
+			}
+			s.seen = time.Now()
+			if s.d != nil && s.l != nil {
+				if !s.paired {
+					s.paired = true
+					log.Printf("relay %s: %s ↔ %s", s.key, s.d, s.l)
+				}
+				// 两边一起通知：免得先收到 /LK 的一端发出的 QUIC 首包，被还在等 /LK 的另一端当成控制报文吞掉
+				conn.WriteToUDP([]byte("/LK"), s.d)
+				conn.WriteToUDP([]byte("/LK"), s.l)
+			}
+			mu.Unlock()
+			continue
+		}
+		mu.Lock()
+		s := byAddr[from.String()]
+		var to *net.UDPAddr
+		if s != nil && s.d != nil && s.l != nil {
+			s.seen = time.Now()
+			to = s.l
+			if from.String() == s.l.String() {
+				to = s.d
+			}
+		}
+		mu.Unlock()
+		if to != nil {
+			conn.WriteToUDP(buf[:n], to)
 		}
 	}
 }

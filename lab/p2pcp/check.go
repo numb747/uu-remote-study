@@ -11,6 +11,8 @@ package main
 //     再问 7001 时映射从 24728 变成 24828）
 //   - 每个地址都这样：映射随目的地变化（对称型 NAT），打洞很难
 //   - 映射端口 < 1024：电信 CGNAT 的低端口段，外面进不来（docs/09 第 6 节）
+//
+// 最后测中继：两个 socket 分别以两端的身份报到，凑齐后从一端发个包，看另一端能不能经中继收到。
 
 import (
 	"fmt"
@@ -124,10 +126,62 @@ func check(o opts) error {
 	if lowPort {
 		fmt.Println("· 被映射到了 1024 以下的低端口：这种端口外面进不来，p2pcp 会自动换 socket")
 	}
+	if reachable > 0 {
+		k := 0
+		for k < len(servers) && rows[k] == nil {
+			k++
+		}
+		srv, _ := net.ResolveUDPAddr("udp4", servers[k])
+		relay := &net.UDPAddr{IP: srv.IP, Port: relayPort}
+		if rtt, err := probeRelay(bindIP, relay); err != nil {
+			fmt.Printf("⚠ 中继 %s 不通（%v）：打不通直连时就没有兜底了\n", relay, err)
+		} else {
+			fmt.Printf("✔ 中继 %s 可用，经中继往返 %v（服务器出方向只有 3M，只够 ssh 这类小流量）\n", relay, rtt.Round(time.Millisecond))
+		}
+	}
 	if ok {
 		fmt.Println("结论：本机这一侧正常。还打不通的话，在对方那台设备上也跑一次 p2pcp check")
 	}
 	return nil
+}
+
+// probeRelay 开两个 socket 分别当中继的两端，凑齐后从 d 端发一个包、等 l 端收到
+func probeRelay(bindIP net.IP, relay *net.UDPAddr) (time.Duration, error) {
+	d, err := net.ListenUDP("udp4", &net.UDPAddr{IP: bindIP})
+	if err != nil {
+		return 0, err
+	}
+	defer d.Close()
+	l, err := net.ListenUDP("udp4", &net.UDPAddr{IP: bindIP})
+	if err != nil {
+		return 0, err
+	}
+	defer l.Close()
+	key := "check-" + randHex(4)
+	errc := make(chan error, 1)
+	go func() { errc <- joinRelay(l, relay, key, "l") }()
+	if err := joinRelay(d, relay, key, "d"); err != nil {
+		return 0, err
+	}
+	if err := <-errc; err != nil {
+		return 0, err
+	}
+	buf := make([]byte, 1500)
+	for range 3 {
+		sent := time.Now()
+		d.WriteToUDP([]byte("/check"), relay)
+		l.SetReadDeadline(sent.Add(time.Second))
+		for {
+			n, _, err := l.ReadFromUDP(buf)
+			if err != nil {
+				break
+			}
+			if string(buf[:n]) == "/check" {
+				return time.Since(sent), nil
+			}
+		}
+	}
+	return 0, fmt.Errorf("凑齐了，但包没转过来")
 }
 
 // probeServer 用 c 向会合服务器发一个体检用的 REG，等它的 YOU 回执，返回本方公网映射和往返时间。
@@ -137,11 +191,11 @@ func probeServer(c *net.UDPConn, server string) (*net.UDPAddr, time.Duration, er
 		return nil, 0, err
 	}
 	room := fmt.Sprintf("check-%08x", rand.Uint32())
-	defer c.WriteToUDP([]byte("UNREG "+room+" check"), srv)
+	defer c.WriteToUDP([]byte("/U2 "+room+" check.0"), srv)
 	buf := make([]byte, 1500)
 	for range 3 { // 丢一两个包不算到不了
 		sent := time.Now()
-		c.WriteToUDP([]byte("REG "+room+" check -"), srv)
+		c.WriteToUDP([]byte("/R2 "+room+" check.0 - -"), srv)
 		c.SetReadDeadline(sent.Add(700 * time.Millisecond))
 		for {
 			n, from, err := c.ReadFromUDP(buf)
@@ -149,7 +203,7 @@ func probeServer(c *net.UDPConn, server string) (*net.UDPAddr, time.Duration, er
 				break
 			}
 			f := strings.Fields(string(buf[:n]))
-			if from.IP.Equal(srv.IP) && from.Port == srv.Port && len(f) == 2 && f[0] == "YOU" {
+			if from.IP.Equal(srv.IP) && from.Port == srv.Port && len(f) == 2 && f[0] == "/Y" {
 				a, err := net.ResolveUDPAddr("udp4", f[1])
 				return a, time.Since(sent), err
 			}

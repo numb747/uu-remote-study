@@ -93,6 +93,12 @@
 - 用 RustDesk 端口转发跑 rsync 备份，只有 3.4Mbps：两端都开着 sing-box TUN，RustDesk 报出去的地址是 `172.18.0.1`，打洞失败，退回 99-server 上的 hbbr 中继，被出方向 3M 卡死。
 - p2pcp 新增 `expose` / `forward`（`lab/p2pcp/tunnel.go`）：打洞后在 QUIC 上做 TCP 端口转发。ssh 管道实测约 167Mbps。退出时主动关闭连接，对端重启后 0.13 秒恢复（之前要等 31 秒的空闲超时）。打洞 + QUIC 接管收成 `dialPeer` / `acceptPeer`，传文件和隧道共用。用法见 [09 第 9 节](docs/09-打洞传文件.md)，ssh 别名 `monkey-p2p`。
 
+### 0.5.9 p2pcp v2：认证、续传、中继、连接迁移（2026-11-07）
+- 架构复盘后一次做完：会合只报房间名的 HMAC，QUIC 握手后用 EKM 做通道绑定认证；`-conns N` 只打一个洞；4MB 分块断点续传 + 自动重连 + 整文件 sha256；99-server 加中继（UDP 3478，`uu-rendezvous.service` 加了 `-relay :3478`，旧二进制留在 `/usr/local/bin/uu-rendezvous.v1`）；expose 并发接入；forward 心跳 + 连接迁移（换网不断 ssh）；修了 socket 泄漏。
+- quic-go 自带的迁移在这里会卡死（路径验证的 PATH_RESPONSE 走坏掉的旧路、服务端泄漏连接 ID），改成服务端 `DisablePathManager` + 客户端发送改道，详见 [09 第 10 节](docs/09-打洞传文件.md)。
+- 实测：netns 实验室 `lab/netns/p2pcp-test.sh` 全过（port/port 13 项、sym/sym 5 项）；真实网络上手机连切三次数据、换了三次公网 IP，隧道 TCP 会话不断；中继 84ms 连上、15 秒后自己迁到直连。
+- **协议和 v1 不兼容，两端都要升级**：电脑端已装（`apps/pc/install.sh`），手机 App 已装（电脑 → 手机已验证），monkey 上的 expose 待换新版。
+
 ### 0.6 换到有 IPv6 的新电脑后，第一步
 ```bash
 ip -6 addr show scope global          # 有 2xxx: 开头的地址 = 有全球单播 IPv6

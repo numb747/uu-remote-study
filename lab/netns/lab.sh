@@ -14,6 +14,8 @@
 #   lab.sh run <natA> <natB> [选项]   跑一次 punch，输出是否打通、走哪条路、RTT
 #   lab.sh matrix [选项]              所有 NAT 组合各跑 --repeat 次，输出成功矩阵
 #   lab.sh shell <natA> <natB> [选项] 搭好后进交互 shell，自己 ip netns exec peerA ...
+#   lab.sh script <natA> <natB> <脚本> [选项]  搭好后在宇宙里执行脚本（p2pcp 测试用，见 p2pcp-test.sh），
+#                                     脚本里可用 $BIN_DIR/{punch,p2pcp}，会合服务器地址 192.0.2.1
 #   lab.sh xfer <own|quic|tcp> [选项]  传输层测试：peerA（NAT 后）发帧流给 inet 上的接收端，
 #                                     弱网用 --netem-a 加在 A 的接入链路上，xfer 参数用 --xfer-args 传
 #
@@ -143,6 +145,7 @@ inner() {
 	case $mode in
 	run) run_punch "$bin" "$log" "$t" "$spray" ;;
 	xfer) run_xfer "$log" ;;
+	script) BIN_DIR=$(dirname "$bin") bash "$SCRIPT" ;;
 	shell)
 		echo "实验宇宙已就绪：natA=$ta natB=$tb。命名空间: inet natA natB peerA peerB"
 		echo "  会合服务器: ip netns exec inet $bin server -listen 192.0.2.1:7000"
@@ -203,6 +206,12 @@ main() {
 		[[ $# -ge 2 ]] || die "$cmd 需要两个 NAT 类型"
 		ta=$1 tb=$2
 		shift 2
+	elif [[ $cmd == script ]]; then
+		[[ $# -ge 3 ]] || die "script 需要两个 NAT 类型和脚本"
+		ta=$1 tb=$2
+		export SCRIPT
+		SCRIPT=$(realpath "$3")
+		shift 3
 	fi
 	NETEM_A="" NETEM_B="" SPRAY=0 TIMEOUT=6 VERBOSE=0 PUNCH_ARGS="" BDAY=0 BDAY_PROBES=1024 REPEAT=1
 	export XFER_ARGS=""
@@ -229,6 +238,7 @@ main() {
 	BIN=$WORK/punch
 	export XFER_BIN=$WORK/xfer
 	(cd "$HERE/.." && CGO_ENABLED=0 go build -o "$BIN" ./punch && CGO_ENABLED=0 go build -o "$XFER_BIN" ./xfer)
+	[[ $cmd == script ]] && (cd "$HERE/.." && CGO_ENABLED=0 go build -o "$WORK/p2pcp" ./p2pcp)
 
 	case $cmd in
 	run)
@@ -245,6 +255,10 @@ main() {
 		;;
 	shell)
 		unshare -Urnm bash "$HERE/lab.sh" __inner shell "$BIN" "$WORK" "$ta" "$tb" \
+			"$NETEM_A" "$NETEM_B" "$TIMEOUT" "$SPRAY"
+		;;
+	script)
+		unshare -Urnm bash "$HERE/lab.sh" __inner script "$BIN" "$WORK" "$ta" "$tb" \
 			"$NETEM_A" "$NETEM_B" "$TIMEOUT" "$SPRAY"
 		;;
 	matrix)
