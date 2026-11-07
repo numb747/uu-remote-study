@@ -1,11 +1,12 @@
 flowchart TD
   matrix["matrix：3×3 NAT 组合 × repeat<br/>输出成功矩阵"]
-  once["once：每次一个新宇宙<br/>unshare -Urnm"]
+  once["once：每次一个新宇宙，跑完从日志取 via / RTT<br/>unshare -Urnm，summarize"]
   bday_role["按双方 NAT 类型分配生日角色<br/>bday_role"]
   setup["拓扑：peer — nat — inet 路由器 — nat — peer<br/>setup / add_side"]
   run_punch["inet 上起会合服务器，两端起 peer<br/>run_punch"]
   punch_bin["punch server / peer"]
-  summarize["从日志取 via / RTT<br/>summarize"]
+  script["script 模式：搭好宇宙后在里面执行一个脚本<br/>lab.sh script natA natB 脚本"]:::changed
+  p2pcp_test["p2pcp 回归测试：send / resume / reconn / tunnel / upgrade<br/>inet 上起 server + 中继；tc 限速、nft 封端口逼它续传、迁移"]:::changed
 
   subgraph table["NAT 状态表：nat_rules 按类型写 nft 规则"]
     nat_rules["nat_rules"]
@@ -33,7 +34,9 @@ flowchart TD
   once -->|"经 inner"| run_punch
   bday_role -->|"ARGS_A / ARGS_B"| run_punch
   run_punch -->|"ip netns exec"| punch_bin
-  once --> summarize
+  script -->|"经 inner，同样先 setup"| setup
+  script -->|"bash 脚本"| p2pcp_test
+  p2pcp_test -->|"ip netns exec inet … server -relay"| punch_bin
 
 %% @src matrix lab/netns/lab.sh matrix)
 %% @src once lab/netns/lab.sh once() {
@@ -41,10 +44,12 @@ flowchart TD
 %% @src setup lab/netns/lab.sh add_side() {
 %% @src run_punch lab/netns/lab.sh run_punch() {
 %% @src punch_bin lab/punch/main.go func main()
-%% @src summarize lab/netns/lab.sh summarize() {
+%% @src script lab/netns/lab.sh script) BIN_DIR=
+%% @src p2pcp_test lab/netns/p2pcp-test.sh for t in $TESTS; do
 %% @src nat_rules lab/netns/lab.sh nat_rules() {
 %% @src nat_port lab/netns/lab.sh port) $nft add rule ip nat post oifname wan masquerade ;;
 %% @src nat_sym lab/netns/lab.sh masquerade fully-random
 %% @src nat_full lab/netns/lab.sh udp dport 1024-65535 dnat
 %% @src fw lab/netns/lab.sh ct state new drop
 %% @src nofw lab/netns/lab.sh --no-fw) NO_FW=1
+classDef changed stroke:#e0af68,stroke-width:3px,stroke-dasharray:7 4

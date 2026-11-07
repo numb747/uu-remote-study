@@ -32,7 +32,7 @@ flowchart TD
 
 %% @src reg lab/punch/main.go base.send(fmt.Sprintf("REG
 %% @src srv_see lab/punch/main.go m[id] = &member{pub: from.String()
-%% @src exchange lab/punch/main.go conn.WriteToUDP([]byte(fmt.Sprintf("PEER %s %s %s", oid
+%% @src exchange lab/punch/main.go conn.WriteToUDP([]byte(peer(oid, o.pub, o.lan, o.flags)), from)
 %% @src cands lab/punch/main.go candidates = append(candidates, pub)
 %% @src punch_all lab/punch/main.go base.send("PUNCH "+*id, c, t)
 %% @src recv_punch lab/punch/main.go case "PUNCH":

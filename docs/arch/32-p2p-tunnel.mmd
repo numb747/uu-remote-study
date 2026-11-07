@@ -3,18 +3,20 @@ flowchart LR
   units["systemd-run --user p2p-tunnel<br/>两端各一个，Restart=always"]
   subgraph local["本机"]
     ssh_cfg["ssh 别名 monkey-p2p<br/>~/.ssh/config：Port 2223，HostKeyAlias 沿用 2222"]
-    fwd["监听 127.0.0.1:2223，每个 TCP 连接开一条流<br/>forward"]:::changed
-    open["连接断了才重新打洞，否则复用<br/>open → dialTunnel"]:::changed
+    fwd["监听 127.0.0.1:2223，每个 TCP 连接开一条流<br/>forward"]
+    open["连接断了才重新打洞，否则复用<br/>open → dialTunnel"]
+    keep["心跳盯路径：断了、换网了、在走中继，就打新洞把连接迁过去<br/>keepPath → migrate"]:::changed
   end
-  rdv["会合服务器 8.140.18.211:7001 / 7000<br/>只交换地址"]
-  conn["一条 QUIC 连接（BBR），登记在 live<br/>dialPeer / acceptPeer → adopt"]:::changed
+  rdv["会合 + 中继 8.140.18.211<br/>会合 7001 / 7000，中继 3478（打不通时兜底）"]:::changed
+  conn["一条 QUIC 连接（BBR），通道绑定认证后才开流<br/>dialPeer / acceptPeer → newLink → authConn"]:::changed
   subgraph remote["对端 monkey（测试机）"]
-    exp["常驻：断了重新会合<br/>expose → keepServing"]:::changed
-    dial_to["每条流连 -to<br/>net.DialTimeout"]:::changed
+    exp["常驻：接上一个就回房间接着等，可同时服务多个 forward<br/>expose → keepServing → serveTunnel"]:::changed
+    help["挂在迁移房间里，对方换了地址就往那里打洞；心跳原样弹回<br/>helpMigrate"]:::changed
+    dial_to["每条流连 -to<br/>net.DialTimeout"]
     sshd["sshd 127.0.0.1:22"]
   end
-  splice["双向对拷，读到 EOF 只关写端<br/>splice"]:::changed
-  exitg["SIGTERM / SIGINT：先关全部连接再退出<br/>exitGracefully → closeLive"]:::changed
+  splice["双向对拷，读到 EOF 只关写端<br/>splice"]
+  exitg["SIGTERM / SIGINT：先关全部连接再退出<br/>exitGracefully → closeLive"]
 
   user -->|"ssh"| ssh_cfg
   ssh_cfg -->|"TCP 127.0.0.1:2223"| fwd
@@ -22,23 +24,31 @@ flowchart LR
   units -->|"启动 expose"| exp
   fwd -->|"每个 TCP 连接"| open
   open -->|"经 dialTunnel：dialPeer"| conn
-  exp -->|"每轮 acceptPeer"| conn
-  open -->|"经 connect：REG 发送端"| rdv
-  exp -->|"经 connect：REG 接收端"| rdv
+  open -->|"打通后起"| keep
+  exp -->|"每接上一个：acceptPeer"| conn
+  exp -->|"每条连接起一个"| help
+  open -->|"经 connect：/R2 send"| rdv
+  exp -->|"经 connect：/R2 recv"| rdv
+  keep -->|"迁移房间 /R2；新 socket 打洞"| rdv
+  help -->|"迁移房间 /R2（连接的 socket）"| rdv
+  keep -.->|"datagram 心跳"| help
   exp -->|"AcceptStream，每条流一个"| dial_to
   dial_to -->|TCP| sshd
   fwd -->|"OpenStreamSync 之后"| splice
   dial_to -->|"连上之后"| splice
-  exitg -.->|"CONNECTION_CLOSE：对方 0.1 秒内知道并重连，不用等 30 秒空闲超时"| conn
+  exitg -.->|"CONNECTION_CLOSE：对方 0.1 秒内知道并重连"| conn
 
 %% @src fwd lab/p2pcp/tunnel.go func forward(
 %% @src open lab/p2pcp/tunnel.go open := func() (*quic.Stream, error)
+%% @src keep lab/p2pcp/tunnel.go func keepPath(
 %% @src rdv lab/punch/main.go func runServer
-%% @src conn lab/p2pcp/transfer.go func adopt(
-%% @src exp lab/p2pcp/tunnel.go func expose(
+%% @src conn lab/p2pcp/link.go func newLink(
+%% @src exp lab/p2pcp/tunnel.go func serveTunnel(
+%% @src help lab/p2pcp/tunnel.go func helpMigrate(
 %% @src dial_to lab/p2pcp/tunnel.go c, err := net.DialTimeout("tcp", o.to, 5*time.Second)
 %% @src splice lab/p2pcp/tunnel.go func splice(
 %% @src exitg lab/p2pcp/main.go func exitGracefully
+%% @link keep 25-flow-migrate.mmd
 %% @link open 24-flow-p2pcp.mmd
 %% @link rdv 20-flow-punch.mmd
 classDef changed stroke:#e0af68,stroke-width:3px,stroke-dasharray:7 4

@@ -1,0 +1,38 @@
+flowchart TD
+  hb["forward 端每秒发一个 QUIC datagram 心跳<br/>keepPath"]:::changed
+  echo["expose 端原样弹回<br/>serveTunnel 里的 ReceiveDatagram → SendDatagram"]:::changed
+  why["触发：4 秒没回音 / 本机默认路由换了网卡 / 正走中继（15 秒起，失败后间隔翻倍）<br/>keepPath"]:::changed
+  newsock["开新 socket，在迁移房间里会合、打洞（只走 IPv4，不走中继）<br/>migrate → connectOnce，房间号 = connSecret(EKM)"]:::changed
+  rdv["会合服务器<br/>8.140.18.211:7001 / 7000"]
+  help["expose 端在连接所在的 socket 上每 5 秒注册迁移房间<br/>收到 /P 就往对方新地址打洞（同一请求只打一次）<br/>helpMigrate"]:::changed
+  addpath["AddPath + 发一次探测：只为让 quic-go 在新 socket 上登记这条连接<br/>不等验证，1 秒后关掉探测路径、还回连接 ID"]:::changed
+  redirect["所有旧 socket 的发送改道到新 socket，并把发往旧地址的包改发新地址<br/>quietConn.redirect / quicSees → real"]:::changed
+  follow["expose 端关了路径验证：收到新地址来的、能解密的新包就改发往那里<br/>DisablePathManager；followMigration 记日志"]:::changed
+  ok["3 秒内新路径上收到心跳回应 → 迁移成功<br/>上面的 TCP 流不受影响"]:::changed
+  fail["没回音 → 撤销改道，2 秒后再试；收不回的 socket 每条连接最多 8 个<br/>超过就不再迁移，等连接超时、下一个 TCP 连接进来时重新打洞"]:::changed
+
+  hb -->|"datagram"| echo
+  echo -.->|"回音断了"| why
+  why --> newsock
+  newsock -->|"/R2 迁移房间 send.随机数"| rdv
+  help -->|"/R2 迁移房间 recv.随机数（经连接的 Transport.WriteTo）"| rdv
+  rdv -->|"/P：两边的新地址"| help
+  help -->|"/PP 打开自家 NAT 的过滤"| newsock
+  newsock -->|"打通"| addpath
+  addpath --> redirect
+  redirect -->|"包都从新地址出去"| follow
+  follow -->|"回包到新 socket"| ok
+  redirect -.->|"3 秒没心跳"| fail
+
+%% @src hb lab/p2pcp/tunnel.go var pong atomic.Int64
+%% @src echo lab/p2pcp/tunnel.go conn.SendDatagram(b)
+%% @src why lab/p2pcp/tunnel.go func keepPath(
+%% @src newsock lab/p2pcp/tunnel.go s, err := connectOnce(mo, l.server.String(), mid
+%% @src rdv lab/punch/main.go func runServer
+%% @src help lab/p2pcp/tunnel.go func helpMigrate(
+%% @src addpath lab/p2pcp/tunnel.go path, err := l.conn.AddPath(tr)
+%% @src redirect lab/p2pcp/tunnel.go redirect(q)
+%% @src follow lab/p2pcp/link.go DisablePathManager: true
+%% @src ok lab/p2pcp/tunnel.go if time.Unix(0, pong.Load()).After(t0) {
+%% @src fail lab/p2pcp/tunnel.go if l.stranded >= 8 {
+classDef changed stroke:#e0af68,stroke-width:3px,stroke-dasharray:7 4

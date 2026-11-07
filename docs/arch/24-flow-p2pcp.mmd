@@ -1,58 +1,60 @@
 flowchart TD
-  entry["入口 ×2：电脑 p2p-direct / 手机 App<br/>都是启动 p2pcp send / daemon"]
-  rooms["每条连接一个子房间 room.i<br/>send 按 -conns（默认 2）切段；recv 读到第 0 条的头再接其余"]
-  rdv["会合服务器 8.140.18.211:7001 / 7000<br/>一个进程听两个端口，房间共享"]
+  entry["入口 ×2：电脑 p2p-direct / 手机 App<br/>都是启动 p2pcp send / daemon（多个文件一次发）"]
+  rid["房间号 = HMAC(房间名)，房间名不上线路<br/>roomSecret / roomID；id = 角色.随机数"]:::changed
+  rdv["会合 + 中继 8.140.18.211<br/>会合 7001 / 7000（房间共享），中继 3478"]
 
-  subgraph addr["① 寻址：会合"]
-    reg["新开 IPv4 socket（-bind auto 每轮现取网卡），有全局 IPv6 再开一个<br/>REG room.i id 候选：[v6]:port + 内网"]
-    you["回执 YOU = 本方公网映射<br/>低端口 / 2 秒无回执 → 坏端口；等待中回执断了 → 失联"]
-    peer["收到 PEER → 对方候选（公网映射 + 自报）<br/>随即 UNREG"]
+  subgraph addr["① 寻址：会合 v2"]
+    reg["新开 IPv4 socket（-bind auto 每轮现取网卡），有全局 IPv6 再开一个<br/>/R2 房间号 id 候选 标志"]:::changed
+    you["回执 /Y = 本方公网映射<br/>低端口 / 2 秒无回执 → 坏端口；等待中回执断了 → 失联"]:::changed
+    peer["收到 /P → 对方候选 + 标志<br/>打洞期间每 500ms 继续注册，打完才 /U2：PEER 丢一个还有下一个"]:::changed
   end
   subgraph pass["② 放行：打洞（IPv4、IPv6 同时）"]
-    punch["每 20ms 向全部候选发 /PP<br/>v4 候选走 v4 socket，v6 走 v6 socket"]
-    trig["收到对方 /PP → 回 /PA<br/>并立即反发一次 /PP（触发检查）"]
+    punch["每 20ms 向全部候选发 /PP；收到对方 /PP 回 /PA 并反发一次（触发检查）<br/>v4 候选走 v4 socket，v6 走 v6 socket"]
     chosen["发送端：第一个 /PA 定路径<br/>用包的源地址作对端（prflx），关掉另一个 socket"]
     nom["提名：发送端在选中路径上发 3 个 /PN<br/>接收端有两个 socket 时等 /PN 或首个 QUIC Initial"]
     retry["4 秒不通、坏端口或失联 → 换新端口、换下一个会合地址重来<br/>最多 6 轮，失败时分层诊断"]
+    relay["发送端两轮打不通：/R2 带 relay 标志，双方都去中继报到<br/>joinRelay：/L 房间号.发送端id d|l → /LK"]:::changed
   end
   subgraph data["③ 传输：QUIC 接管同一个 socket"]
-    quic["发送端 dialPeer / 接收端 acceptPeer<br/>quic.Transport 接管，证书不校验；SIGTERM 时 closeLive 主动关闭"]:::changed
-    late["迟到的 /PP 照样回 /PA<br/>answerPunch / ReadNonQUICPacket"]
-    cc["拥塞控制 applyCC<br/>默认 bbr；可选 cubic / brutal"]
-    write["接收端按偏移写同一文件，回 OK"]
+    quic["newLink：quic.Transport 接管（quietConn 把发送错误当丢包）<br/>后台 readNonQUIC 回应迟到的 /PP；SIGTERM 时 closeLive"]:::changed
+    auth["通道绑定认证：HMAC(密钥, 角色 + EKM)，第一条流交换<br/>authConn，对不上就关连接"]:::changed
+    conns["同一个洞上再 l.dial 第 2…N 条连接（-conns，默认 2；中继时 1 条）<br/>各自 applyCC，默认 bbr"]:::changed
+    pieces["控制流 offer → have（已收区间）；缺的切成 4MB 块，各连接抢着发，一块一条单向流<br/>接收端写 .part、区间记进 .json；end 带 sha256，校验过才改名；断了留半成品"]:::changed
   end
 
-  entry -->|"exec / ProcessBuilder，App 的 -lan 由 Java 给"| rooms
-  rooms -->|"每条调 connect"| reg
-  reg -->|"UDP，房间名即密钥，明文"| rdv
-  rdv -->|YOU| you
-  rdv -->|PEER| peer
+  entry -->|"exec / ProcessBuilder，App 的 -lan 由 Java 给"| rid
+  rid -->|"dialPeer / acceptPeer 调 connect"| reg
+  reg -->|"UDP，只有房间号"| rdv
+  rdv -->|"/Y"| you
+  rdv -->|"/P"| peer
   you -.->|"坏端口 / 失联"| retry
   peer --> punch
-  punch -->|"对方的 PP 到达"| trig
-  trig -->|"我方 PP 被回应"| chosen
+  punch -->|"我方 /PP 被回应"| chosen
   chosen -->|"发送端"| nom
   punch -.->|"4 秒不通"| retry
   retry -.->|"新 socket"| reg
+  retry -.->|"发送端第 3 轮起"| relay
+  relay -->|"经中继转发"| quic
   nom -->|"同一个 socket"| quic
-  quic --> late
-  quic -->|"发送端"| cc
-  cc -->|"QUIC 流：头 + 文件段"| write
+  quic -->|"Dial / Accept 之后"| auth
+  auth -->|"发送端"| conns
+  conns -->|"sendPiece"| pieces
+  pieces -.->|"连接断了：send 自己重连，have 只报缺的"| rid
 
 %% @src entry apps/pc/p2p-direct case ${1:-} in
-%% @src rooms lab/p2pcp/transfer.go func roomOf
+%% @src rid lab/p2pcp/auth.go func roomID(
 %% @src rdv lab/punch/main.go func runServer
-%% @src reg lab/p2pcp/main.go cands = c6.LocalAddr().String() + "," + cands
-%% @src you lab/p2pcp/main.go if len(f) == 2 && f[0] == "YOU" {
-%% @src peer lab/p2pcp/main.go // 拿到地址就注销
-%% @src punch lab/p2pcp/main.go via.WriteToUDP(pktPunch, a)
-%% @src trig lab/p2pcp/main.go case msgPunch:
-%% @src chosen lab/p2pcp/main.go choose := func(c *net.UDPConn, from *net.UDPAddr)
-%% @src nom lab/p2pcp/main.go chosenOn.WriteToUDP(pktNom, chosen)
-%% @src retry lab/p2pcp/main.go const attempts = 6
-%% @src quic lab/p2pcp/transfer.go func dialPeer
-%% @src late lab/p2pcp/transfer.go func answerPunch
-%% @src cc lab/p2pcp/cc.go func applyCC
-%% @src write lab/p2pcp/transfer.go w := io.NewOffsetWriter(out, int64(h.off))
+%% @src reg lab/p2pcp/rdv.go reg := fmt.Sprintf("/R2
+%% @src you lab/p2pcp/rdv.go f[0] == "/Y"
+%% @src peer lab/p2pcp/rdv.go // 打洞期间继续每 500ms 注册一次
+%% @src punch lab/p2pcp/rdv.go via.WriteToUDP(pktPunch, a)
+%% @src chosen lab/p2pcp/rdv.go choose := func(c *net.UDPConn
+%% @src nom lab/p2pcp/rdv.go chosenOn.WriteToUDP(pktNom, chosen)
+%% @src retry lab/p2pcp/rdv.go const attempts = 6
+%% @src relay lab/p2pcp/rdv.go func joinRelay(
+%% @src quic lab/p2pcp/link.go func newLink(
+%% @src auth lab/p2pcp/auth.go func authConn(
+%% @src conns lab/p2pcp/transfer.go c, err := l.dial()
+%% @src pieces lab/p2pcp/transfer.go func recvFile(
 %% @link entry 31-p2p-direct.mmd
 classDef changed stroke:#e0af68,stroke-width:3px,stroke-dasharray:7 4

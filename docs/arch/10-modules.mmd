@@ -1,22 +1,20 @@
 flowchart LR
   subgraph punch_pkg["lab/punch：会合 + 打洞实验"]
-    punch_server["会合服务器：多端口、房间共享、定期清理<br/>runServer（REG / UNREG → PEER / YOU）"]
+    punch_server["会合服务器 + 中继：多端口、房间共享、按 IP 限速；v1 / v2 两版协议<br/>runServer（REG·/R2 → PEER·/P）/ runRelay（/L → /LK，之后原样互转）"]:::changed
     punch_peer["打洞对等端 ×3<br/>runPeer / sock.send / hostCandidates"]
   end
   set_ttl["设置 IP_TTL ×2<br/>setTTL"]
-  subgraph natprobe_pkg["lab/natprobe：NAT 画像"]
-    np_tests["画像测试 + 配合服务端 ×3<br/>runStun·Filter·TTL·Life / runServer / stun.go"]
-    np_peer["手工打洞对等端<br/>runPeer（RTT + 时钟偏差）"]
-  end
+  np["natprobe：NAT 画像测试 + 手工打洞 ×2<br/>runStun·Filter·TTL·Life / runPeer"]
   stunprobe["映射行为探测<br/>stunprobe"]
-  subgraph p2pcp_pkg["lab/p2pcp：打洞传文件"]
-    p2p_connect["会合（地址轮换 + 保活）+ 双栈打洞 + 提名；check 体检<br/>connect / connectOnce / check"]
-    p2p_xfer["QUIC 接管 socket + 传文件；退出时主动关连接<br/>dialPeer / acceptPeer / closeLive，send / recv（apernet/quic-go）"]:::changed
-    p2p_tunnel["端口转发：每个 TCP 连接一条 QUIC 流<br/>expose / forward / splice（tunnel.go）"]:::changed
+  subgraph p2pcp_pkg["lab/p2pcp：打洞直连"]
+    p2p_connect["会合 v2（房间号、打洞期间持续注册）+ 双栈打洞 + 提名 + 中继兜底；check 体检<br/>connect / connectOnce / joinRelay（rdv.go）"]:::changed
+    p2p_link["QUIC 接管打通的 socket：一个洞上多条连接、通道绑定认证、发送错误当丢包<br/>newLink / dialPeer / acceptPeer / authConn / quietConn（link.go、auth.go）"]:::changed
+    p2p_xfer["传文件：4MB 块单向流、断点续传、自动重连、整文件 sha256<br/>send / sendSession / recvFile / recvPiece / daemon（transfer.go）"]:::changed
+    p2p_tunnel["端口转发 + 连接迁移：expose 并发接入，forward 心跳、换网打新洞迁过去<br/>expose / forward / keepPath / migrate（tunnel.go）"]:::changed
   end
   hyscc["Hysteria 拥塞控制<br/>third_party/hyscc bbr / brutal"]
   apps["P2P 直传软件 ×2<br/>安卓 App MainActivity / 电脑端 p2p-direct"]
-  lab_sh["netns 实验室<br/>lab.sh"]
+  lab_sh["netns 实验室 ×2<br/>lab.sh / p2pcp-test.sh"]:::changed
   pcphone["PC ↔ 手机编排 ×2<br/>pcphone.sh / cc-bench.sh"]
   transport["传输层 ×3<br/>transport / fakeenc / xfer"]
   stun_pub[公共 STUN 服务器]
@@ -24,44 +22,45 @@ flowchart LR
   punch_peer -->|"REG"| punch_server
   punch_server -->|"PEER"| punch_peer
   punch_peer -->|"经 sock.send"| set_ttl
-  p2p_connect -->|"REG / UNREG"| punch_server
-  punch_server -->|"PEER / YOU"| p2p_connect
-  p2p_xfer -->|"dialPeer / acceptPeer 里调 connect，每条连接一次"| p2p_connect
-  p2p_tunnel -->|"dialPeer / acceptPeer"| p2p_xfer
+  p2p_connect -->|"/R2 / /U2；打不通时 /L 进中继"| punch_server
+  punch_server -->|"/P / /Y / /LK"| p2p_connect
+  p2p_link -->|"connect：每次会合打一个洞"| p2p_connect
+  p2p_xfer -->|"dialPeer / acceptPeer，再 l.dial 开第 2…N 条"| p2p_link
+  p2p_tunnel -->|"dialPeer / acceptPeer"| p2p_link
+  p2p_tunnel -->|"迁移时在迁移房间里 connectOnce 打新洞"| p2p_connect
   p2p_tunnel -->|"applyCC（两端）"| hyscc
   p2p_xfer -->|"applyCC（发送端，默认 bbr）"| hyscc
   apps -->|"exec / ProcessBuilder 启动 send / daemon"| p2p_xfer
-  np_tests -->|"runTTL 调用"| set_ttl
-  np_tests -->|"STUN Binding"| stun_pub
-  np_peer -->|"低 TTL 预热"| set_ttl
-  np_peer -->|"STUN Binding"| stun_pub
+  np -->|"runTTL / 低 TTL 预热"| set_ttl
+  np -->|"STUN Binding"| stun_pub
   stunprobe -->|"STUN Binding"| stun_pub
   lab_sh -->|"ip netns exec … server"| punch_server
   lab_sh -->|"ip netns exec … peer"| punch_peer
+  lab_sh -->|"script：p2pcp-test.sh 跑 send / recv / daemon 用例"| p2p_xfer
+  lab_sh -->|"script：p2pcp-test.sh 跑 expose / forward，封端口逼它迁移"| p2p_tunnel
   lab_sh -->|"run_xfer"| transport
-  pcphone -->|"natprobe stun"| np_tests
-  pcphone -->|"natprobe peer -file"| np_peer
+  pcphone -->|"natprobe stun / peer -file"| np
   pcphone -->|"xfer -local 复用打洞端口"| transport
   pcphone -->|"cc-bench：本机 recv + adb 手机 send，逐组比拥塞控制"| p2p_xfer
 
 %% @src punch_server lab/punch/main.go func runServer
 %% @src punch_peer lab/punch/main.go func runPeer
 %% @src set_ttl lab/punch/ttl_unix.go func setTTL
-%% @src np_tests lab/natprobe/main.go func runStun
-%% @src np_peer lab/natprobe/peer.go func runPeer
+%% @src np lab/natprobe/main.go func runStun
 %% @src stunprobe lab/stunprobe/main.go func main()
-%% @src p2p_connect lab/p2pcp/main.go func connect(
-%% @src p2p_xfer lab/p2pcp/transfer.go func send(
+%% @src p2p_connect lab/p2pcp/rdv.go func connect(
+%% @src p2p_link lab/p2pcp/link.go func newLink(
+%% @src p2p_xfer lab/p2pcp/transfer.go func sendSession(
 %% @src hyscc lab/third_party/hyscc/brutal/brutal.go func NewBrutalSender
 %% @src apps apps/pc/p2p-direct case ${1:-} in
-%% @src p2p_tunnel lab/p2pcp/tunnel.go func expose(
+%% @src p2p_tunnel lab/p2pcp/tunnel.go func keepPath(
 %% @src lab_sh lab/netns/lab.sh main() {
 %% @src pcphone lab/real/pcphone.sh case $1 in
 %% @src transport lab/xfer/main.go func main()
 %% @link punch_peer 20-flow-punch.mmd
-%% @link np_tests 22-flow-nat-profile.mmd
-%% @link np_peer 23-flow-manual-punch.mmd
+%% @link np 22-flow-nat-profile.mmd
 %% @link p2p_connect 24-flow-p2pcp.mmd
+%% @link p2p_link 24-flow-p2pcp.mmd
 %% @link lab_sh 30-netns-nat.mmd
 %% @link apps 31-p2p-direct.mmd
 %% @link p2p_tunnel 32-p2p-tunnel.mmd

@@ -1,3 +1,15 @@
+## 2026-11-07 · a85cb98+dirty → ac3a392+dirty
+
+- p2pcp v2 拆出三个文件：会合 + 打洞 + 中继兜底在 rdv.go，QUIC 接管 socket 在 link.go，房间号和通道绑定认证在 auth.go。模块图把原来的 p2p_connect / p2p_xfer 改成 p2p_connect、p2p_link、p2p_xfer 三个节点（新增 p2p_link），p2p_tunnel 多了一条直接到 p2p_connect 的边（迁移时打新洞）。
+- 会合协议 v2（/R2 /P /Y /U2，只报房间名的 HMAC，打洞期间持续注册）和服务器上的中继 runRelay（UDP 3478）：总览 rdv、模块图 punch_server、24 号图的 rid / reg / you / peer / relay、31 号图的 rdv 和一条经中继的虚线。20 号图 exchange 节点的锚点跟着服务器代码改了（v1 流程本身没变）。
+- -conns N 只打一个洞：24 号图删掉「每条连接一个子房间」节点，换成 rid 和 conns；传文件改成 4MB 块 + 断点续传 + sha256，write 节点换成 pieces（旧的 write、late 节点删了，late 并进 quic，trig 并进 punch）。
+- 新图 25-flow-migrate：forward 心跳 → 打新洞 → AddPath 登记 → 发送改道 → expose 端不验证直接跟过去 → 心跳确认。quic-go 自带的迁移（Probe 验证后 Switch）在这里会卡死：PATH_RESPONSE 走坏掉的旧路、服务端每迁移一次漏一个连接 ID（docs/09 第 10.2 节），所以画的是绕开它的做法。从 32 号图的 keep 节点进入。
+- 32 号图：expose 并发接入（keepServing → serveTunnel），新增 forward 端 keep（keepPath）、expose 端 help（helpMigrate）；conn 节点改成 newLink + authConn，旧的 adopt 已删。
+- 30 号图：lab.sh 新增 script 模式和 p2pcp-test.sh（5 个用例），summarize 并进 once 节点腾名额。总览 netns_lab 多一条到 p2pcp 的边，模块图 lab_sh 改为「×2」并连到 p2p_xfer / p2p_tunnel。
+- 31 号图：App 选的文件一次交给 p2pcp send；电脑端写 .part、校验后改名。
+- 为腾名额：模块图把 natprobe 的两个节点合成 np（链到 22 号图；23 号图仍可从总览 real_lab 进入）。
+- 上一段的疑点已解决：recv 子连接互相等待的问题随「一个洞多条连接」消失；隧道和传文件都有了通道绑定认证。
+
 ## 2026-10-21 · a85cb98 → a85cb98+dirty
 
 - 新增端口转发 `p2pcp expose` / `forward`（tunnel.go）：打洞后在一条 QUIC 连接上，每个 TCP 连接对应一条流，用来让 rsync / ssh 不走 RustDesk 的中继。新图 32-p2p-tunnel 画两台机器、会合服务器和流怎么接到 sshd；模块图新增 p2p_tunnel；总览的 p2pcp 节点改名为「打洞直连核心」，加了一条用户经 forward 跑 rsync 的边。
