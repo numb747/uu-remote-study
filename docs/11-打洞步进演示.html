@@ -1,0 +1,576 @@
+<title>打洞步进演示</title>
+<meta name="claude:viewport-fit-sides" content="cover">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;600&family=Noto+Sans+SC:wght@400;500;700&family=Noto+Serif+SC:wght@700&display=swap">
+<style>
+/* 布局：左边是网络拓扑（包在上面走），右边是旁白和控制；下面三张卡片是 NAT A / 服务器 / NAT B 的状态表 */
+:root {
+  --bg: #edf0f2;
+  --panel: #fbfcfc;
+  --ink: #17212b;
+  --muted: #5a6774;
+  --line: #c9d1d8;
+  --accent: #2457c5;   /* 打洞包 PUNCH / ACK */
+  --sig: #a86a00;      /* 信令 REG / YOU / PEER */
+  --data: #7a43b6;     /* 打通后的数据 */
+  --ok: #1f8048;
+  --bad: #c0392b;
+  --f-display: "Noto Serif SC", "Songti SC", "SimSun", serif;
+  --f-body: "Noto Sans SC", "PingFang SC", "Microsoft YaHei", system-ui, sans-serif;
+  --f-mono: "IBM Plex Mono", ui-monospace, "SFMono-Regular", Menlo, monospace;
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --bg: #0f151b; --panel: #172029; --ink: #e2e8ee; --muted: #93a1ae; --line: #2c3844;
+    --accent: #7aa2ff; --sig: #e0a84a; --data: #b78cff; --ok: #4cc27f; --bad: #ff6b5e;
+    color-scheme: dark;
+  }
+}
+:root[data-theme="dark"] {
+  --bg: #0f151b; --panel: #172029; --ink: #e2e8ee; --muted: #93a1ae; --line: #2c3844;
+  --accent: #7aa2ff; --sig: #e0a84a; --data: #b78cff; --ok: #4cc27f; --bad: #ff6b5e;
+  color-scheme: dark;
+}
+
+* { box-sizing: border-box; }
+body {
+  background: var(--bg); color: var(--ink);
+  font-family: var(--f-body); font-size: 15px; line-height: 1.65;
+  padding-left: max(16px, env(safe-area-inset-left, 0px));
+  padding-right: max(16px, env(safe-area-inset-right, 0px));
+  padding-block: 20px 40px;
+}
+.wrap { max-width: 1120px; margin: 0 auto; display: grid; gap: 18px; }
+code, .mono { font-family: var(--f-mono); font-size: .9em; }
+
+header.top { display: flex; flex-wrap: wrap; gap: 12px 24px; align-items: end; justify-content: space-between; }
+header.top h1 { font-family: var(--f-display); font-size: 1.75rem; line-height: 1.25; margin: 0; text-wrap: balance; }
+header.top p { margin: 4px 0 0; color: var(--muted); max-width: 40em; }
+.opts { display: flex; flex-wrap: wrap; gap: 10px 16px; align-items: center; }
+.seg { display: inline-flex; flex-wrap: wrap; border: 1px solid var(--line); border-radius: 8px; overflow: hidden; background: var(--panel); }
+.seg button { font: inherit; font-size: .88rem; border: 0; background: transparent; color: var(--muted); padding: 6px 12px; cursor: pointer; }
+.seg button + button { border-left: 1px solid var(--line); }
+.seg button[aria-pressed="true"] { background: var(--ink); color: var(--panel); }
+.chk { display: inline-flex; gap: 6px; align-items: center; font-size: .88rem; color: var(--muted); cursor: pointer; }
+.chk input { accent-color: var(--accent); }
+
+.main { display: grid; grid-template-columns: minmax(0, 1.45fr) minmax(0, 1fr); gap: 18px; align-items: start; }
+@media (max-width: 880px) { .main { grid-template-columns: minmax(0, 1fr); } }
+
+.stage { background: var(--panel); border: 1px solid var(--line); border-radius: 12px; padding: 12px; display: grid; gap: 10px; min-width: 0; }
+.stage svg { width: 100%; height: auto; display: block; }
+.legend { display: flex; flex-wrap: wrap; gap: 4px 16px; font-size: .8rem; color: var(--muted); }
+.legend i { display: inline-block; width: 9px; height: 9px; border-radius: 50%; margin-right: 5px; vertical-align: 1px; }
+
+/* SVG */
+.region { fill: color-mix(in srgb, var(--accent) 6%, transparent); stroke: var(--line); stroke-dasharray: 4 4; }
+.region-t { fill: var(--muted); font-size: 14px; }
+.wire { stroke: var(--line); stroke-width: 2.5; }
+.wire.direct { stroke-dasharray: 7 6; }
+.wire.direct.ok { stroke: var(--ok); stroke-dasharray: none; stroke-width: 4; }
+.wire.direct.fail { stroke: var(--bad); }
+.box { fill: var(--panel); stroke: var(--ink); stroke-width: 1.6; }
+.box.nat { fill: color-mix(in srgb, var(--ink) 7%, var(--panel)); }
+.n-t { fill: var(--ink); font-size: 18px; font-weight: 700; text-anchor: middle; font-family: var(--f-body); }
+.n-s { fill: var(--muted); font-size: 15px; text-anchor: middle; font-family: var(--f-mono); }
+.mid-t { fill: var(--muted); font-size: 14px; text-anchor: middle; }
+#gSrv, .srvwire { transition: opacity .4s; }
+.dim { opacity: .3; }
+#dot circle { stroke: var(--panel); stroke-width: 2.5; }
+#dot text { font-family: var(--f-mono); font-size: 15px; font-weight: 600; text-anchor: middle; paint-order: stroke; stroke: var(--panel); stroke-width: 4px; }
+#verd circle { stroke: var(--panel); stroke-width: 2; }
+#verd text { fill: #fff; font-size: 18px; font-weight: 700; text-anchor: middle; dominant-baseline: central; }
+
+/* 当前包 */
+.pkt { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 10px; padding: 8px 10px; border-radius: 8px; background: color-mix(in srgb, var(--ink) 5%, var(--panel)); min-height: 42px; }
+.pkt .ptag { font-family: var(--f-mono); font-weight: 600; font-size: .85rem; padding: 1px 8px; border-radius: 5px; color: var(--panel); background: var(--muted); }
+.pkt .addr { font-family: var(--f-mono); font-size: .88rem; padding: 0 4px; border-radius: 4px; transition: background .3s; }
+.pkt .addr.changed { background: color-mix(in srgb, var(--sig) 28%, transparent); }
+.pkt .lbl { font-size: .75rem; color: var(--muted); letter-spacing: .04em; }
+.pkt .empty { color: var(--muted); font-size: .88rem; }
+.note { margin: 0; font-size: .9rem; min-height: 1.6em; }
+
+/* 旁白 */
+.narr { background: var(--panel); border: 1px solid var(--line); border-radius: 12px; padding: 16px 18px; display: grid; gap: 12px; min-width: 0; }
+.stepno { font-family: var(--f-mono); font-size: .8rem; color: var(--muted); letter-spacing: .06em; }
+.narr h2 { font-family: var(--f-display); font-size: 1.3rem; line-height: 1.35; margin: 0; text-wrap: balance; }
+.narr p.body { margin: 0; }
+.coderef { font-size: .82rem; color: var(--muted); }
+.coderef code { color: var(--ink); }
+.ask { border: 1.5px solid var(--accent); border-radius: 10px; padding: 10px 12px; display: grid; gap: 8px; background: color-mix(in srgb, var(--accent) 7%, var(--panel)); }
+.ask p { margin: 0; font-weight: 500; }
+.ask .btns { display: flex; gap: 8px; flex-wrap: wrap; }
+.fb { margin: 0; font-size: .9rem; }
+.fb.ok { color: var(--ok); } .fb.bad { color: var(--bad); }
+.ctrl { display: flex; flex-wrap: wrap; gap: 8px; }
+.btn { font: inherit; font-size: .9rem; border: 1px solid var(--line); background: var(--panel); color: var(--ink); border-radius: 8px; padding: 7px 14px; cursor: pointer; }
+.btn.primary { background: var(--accent); border-color: var(--accent); color: var(--panel); font-weight: 500; }
+.btn:disabled { opacity: .4; cursor: default; }
+.btn:focus-visible, .seg button:focus-visible, .dots button:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.dots { display: flex; flex-wrap: wrap; gap: 6px; }
+.dots button { width: 26px; height: 26px; border-radius: 50%; border: 1px solid var(--line); background: var(--panel); color: var(--muted); font: 600 .75rem var(--f-mono); cursor: pointer; padding: 0; }
+.dots button.done { background: color-mix(in srgb, var(--ink) 12%, var(--panel)); color: var(--ink); }
+.dots button.cur { background: var(--ink); color: var(--panel); border-color: var(--ink); }
+.hint { font-size: .82rem; color: var(--muted); margin: 0; }
+
+/* 状态卡片 */
+.cards { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, .8fr) minmax(0, 1fr); gap: 14px; align-items: start; }
+@media (max-width: 880px) { .cards { grid-template-columns: minmax(0, 1fr); } }
+.card { background: var(--panel); border: 1px solid var(--line); border-radius: 12px; padding: 14px; display: grid; gap: 10px; min-width: 0; transition: border-color .3s, box-shadow .3s; }
+.card.flash-bad { border-color: var(--bad); box-shadow: 0 0 0 3px color-mix(in srgb, var(--bad) 20%, transparent); }
+.card.flash-ok { border-color: var(--ok); box-shadow: 0 0 0 3px color-mix(in srgb, var(--ok) 20%, transparent); }
+.cardhead { display: flex; flex-wrap: wrap; gap: 4px 10px; align-items: baseline; justify-content: space-between; }
+.card h3 { margin: 0; font-size: 1.02rem; }
+.ntype { font-size: .78rem; font-family: var(--f-mono); padding: 1px 8px; border-radius: 5px; border: 1px solid var(--line); color: var(--muted); }
+.rule { margin: 0; font-size: .8rem; color: var(--muted); line-height: 1.55; }
+.rule b { color: var(--ink); font-weight: 500; }
+.tblwrap { overflow-x: auto; }
+table { width: 100%; border-collapse: collapse; font-size: .84rem; }
+th { text-align: left; font-weight: 500; color: var(--muted); font-size: .74rem; letter-spacing: .04em; padding: 4px 6px; border-bottom: 1px solid var(--line); white-space: nowrap; }
+td { font-family: var(--f-mono); padding: 5px 6px; border-bottom: 1px solid color-mix(in srgb, var(--line) 60%, transparent); white-space: nowrap; font-variant-numeric: tabular-nums; }
+tr.hi-new td { background: color-mix(in srgb, var(--accent) 16%, transparent); }
+tr.hi-ok td { background: color-mix(in srgb, var(--ok) 20%, transparent); }
+td.emptyrow { font-family: var(--f-body); color: var(--muted); white-space: normal; }
+.know { border-top: 1px dashed var(--line); padding-top: 8px; }
+.know h4 { margin: 0 0 4px; font-size: .8rem; color: var(--muted); font-weight: 500; letter-spacing: .04em; }
+.know dl { margin: 0; display: grid; grid-template-columns: auto minmax(0, 1fr); gap: 2px 10px; font-size: .84rem; }
+.know dt { color: var(--muted); }
+.know dd { margin: 0; font-family: var(--f-mono); overflow-wrap: anywhere; }
+.know dd.diff { color: var(--bad); }
+.room { list-style: none; margin: 0; padding: 0; display: grid; gap: 4px; font-size: .84rem; }
+.room li { font-family: var(--f-mono); overflow-wrap: anywhere; }
+.room li.none { font-family: var(--f-body); color: var(--muted); }
+.phase { font-size: .86rem; padding: 6px 10px; border-radius: 8px; background: color-mix(in srgb, var(--ink) 6%, var(--panel)); }
+.phase.ok { background: color-mix(in srgb, var(--ok) 16%, var(--panel)); color: var(--ok); font-weight: 500; }
+.phase.fail { background: color-mix(in srgb, var(--bad) 14%, var(--panel)); color: var(--bad); font-weight: 500; }
+@media (prefers-reduced-motion: reduce) { * { transition: none !important; } }
+</style>
+
+<div class="wrap">
+  <header class="top">
+    <div>
+      <h1>打洞步进演示</h1>
+      <p>一步一步看 REG、PEER、PUNCH 这些包怎么走，两张 NAT 表怎么变。地址取自 <code>docs/10</code> 里的真实环境，端口号是示例。</p>
+    </div>
+    <div class="opts">
+      <div class="seg" role="group" aria-label="场景" id="scen"></div>
+      <label class="chk"><input type="checkbox" id="predict" checked> 先猜再看</label>
+    </div>
+  </header>
+
+  <div class="main">
+    <section class="stage" aria-label="网络拓扑">
+      <svg viewBox="0 0 600 424" role="img" aria-label="本机 A、NAT A、会合服务器、NAT B、对端 B 的拓扑图">
+        <rect class="region" x="4" y="268" width="222" height="150" rx="10"></rect>
+        <rect class="region" x="374" y="268" width="222" height="150" rx="10"></rect>
+        <text class="region-t" x="16" y="290">本机内网</text>
+        <text class="region-t" x="386" y="290">对端内网</text>
+        <line class="wire srvwire" id="wA" x1="115" y1="200" x2="300" y2="56"></line>
+        <line class="wire srvwire" id="wB" x1="485" y1="200" x2="300" y2="56"></line>
+        <line class="wire" x1="115" y1="200" x2="115" y2="350"></line>
+        <line class="wire" x1="485" y1="200" x2="485" y2="350"></line>
+        <line class="wire direct" id="wDirect" x1="115" y1="200" x2="485" y2="200"></line>
+        <text class="mid-t" id="midT" x="300" y="188">公网</text>
+        <g id="gSrv">
+          <rect class="box" x="185" y="22" width="230" height="68" rx="10"></rect>
+          <text class="n-t" x="300" y="50">会合服务器</text>
+          <text class="n-s" x="300" y="74">8.140.18.211:7001</text>
+        </g>
+        <g>
+          <rect class="box nat" x="15" y="166" width="200" height="68" rx="6"></rect>
+          <text class="n-t" x="115" y="194">NAT A</text>
+          <text class="n-s" x="115" y="218">110.228.186.81</text>
+        </g>
+        <g>
+          <rect class="box nat" x="385" y="166" width="200" height="68" rx="6"></rect>
+          <text class="n-t" x="485" y="194">NAT B</text>
+          <text class="n-s" x="485" y="218">183.197.45.114</text>
+        </g>
+        <g>
+          <rect class="box" x="15" y="316" width="200" height="68" rx="10"></rect>
+          <text class="n-t" x="115" y="344">本机 A</text>
+          <text class="n-s" x="115" y="368">192.168.1.95:40001</text>
+        </g>
+        <g>
+          <rect class="box" x="385" y="316" width="200" height="68" rx="10"></rect>
+          <text class="n-t" x="485" y="344">对端 B</text>
+          <text class="n-s" x="485" y="368">192.168.0.10:40002</text>
+        </g>
+        <g id="verd" hidden><circle r="16"></circle><text>✓</text></g>
+        <g id="dot" hidden><circle r="10"></circle><text y="-17"></text></g>
+      </svg>
+      <div class="legend">
+        <span><i style="background:var(--sig)"></i>信令 REG / YOU / PEER</span>
+        <span><i style="background:var(--accent)"></i>打洞 PUNCH / ACK</span>
+        <span><i style="background:var(--data)"></i>打通后的数据</span>
+      </div>
+      <div class="pkt" id="pkt" aria-live="polite"></div>
+      <p class="note" id="note"></p>
+    </section>
+
+    <section class="narr" aria-label="步骤说明">
+      <div class="stepno" id="stepno"></div>
+      <h2 id="stitle"></h2>
+      <p class="body" id="sbody"></p>
+      <div class="coderef" id="scode"></div>
+      <div class="ask" id="ask" hidden>
+        <p id="askQ"></p>
+        <div class="btns" id="askBtns">
+          <button class="btn" id="gYes" type="button">能进去</button>
+          <button class="btn" id="gNo" type="button">会被丢掉</button>
+        </div>
+        <p class="fb" id="askFb"></p>
+      </div>
+      <div class="ctrl">
+        <button class="btn" id="prev" type="button">← 上一步</button>
+        <button class="btn" id="replay" type="button">重播这一步</button>
+        <button class="btn primary" id="next" type="button">下一步 →</button>
+      </div>
+      <div class="dots" id="dots" aria-label="跳到某一步"></div>
+      <p class="hint">键盘 ← → 也能翻步。点圆点直接跳到那一步的结果，不播动画。</p>
+    </section>
+  </div>
+
+  <section class="cards" aria-label="状态表">
+    <div class="card" id="cardA"></div>
+    <div class="card" id="cardS"></div>
+    <div class="card" id="cardB"></div>
+  </section>
+</div>
+
+<script>
+const SRV = '8.140.18.211:7001';
+const HOST = { A: { in: '192.168.1.95:40001', lanIP: '192.168.1.95' }, B: { in: '192.168.0.10:40002', lanIP: '192.168.0.10' } };
+const PUB = { A: '110.228.186.81', B: '183.197.45.114' };
+const PORTS = { A: [23456, 23461], B: [61002, 61377] };
+const POS = { srv: { x: 300, y: 56 }, natA: { x: 115, y: 200 }, natB: { x: 485, y: 200 }, hostA: { x: 115, y: 350 }, hostB: { x: 485, y: 350 } };
+const SCEN = {
+  cone:   { name: '两边都是锥形',       A: { map: 'EIM', filt: 'APDF' }, B: { map: 'EIM', filt: 'APDF' } },
+  sym:    { name: '对端是对称 NAT',     A: { map: 'EIM', filt: 'APDF' }, B: { map: 'EDM', filt: 'APDF' } },
+  symadf: { name: '对端对称，本机只看 IP', A: { map: 'EIM', filt: 'ADF' },  B: { map: 'EDM', filt: 'APDF' } },
+};
+const ip = a => a.split(':')[0];
+const port = a => +a.split(':')[1];
+const other = n => (n === 'A' ? 'B' : 'A');
+const natType = c => c.map === 'EDM' ? 'NAT4 对称型' : (c.filt === 'APDF' ? 'NAT3 端口限制锥形' : 'NAT2 限制锥形');
+const MAP_RULE = { EIM: '<b>映射 EIM</b>：同一个 socket 不管发往哪，都用同一个公网端口', EDM: '<b>映射 EDM</b>：发往不同的地址，就换一个新的公网端口' };
+const FILT_RULE = { APDF: '<b>过滤 APDF</b>：进来的包，源 IP 和端口都要和「去过」的某一行对上', ADF: '<b>过滤 ADF</b>：进来的包，只要源 IP 和「去过」的某一行对上' };
+
+/* ---------- 模拟器：按场景真的去查表、分配端口，生成每一帧 ---------- */
+function makeSim(sc) {
+  const cfg = SCEN[sc];
+  const st = { nat: { A: [], B: [] }, room: {}, know: { A: { self: null, peer: null, got: null }, B: { self: null, peer: null, got: null } }, phase: 'idle' };
+  const alloc = { A: 0, B: 0 };
+  const snap = () => JSON.parse(JSON.stringify(st));
+
+  function outbound(h, dst) {
+    const n = h, c = cfg[n], rows = st.nat[n], inA = HOST[h].in;
+    const r = c.map === 'EIM' ? rows.find(x => x.in === inA) : rows.find(x => x.in === inA && x.dst === dst);
+    const fresh = !r;
+    const out = r ? r.out : PORTS[n][alloc[n]++];
+    let idx = rows.findIndex(x => x.in === inA && x.out === out && x.dst === dst);
+    const added = idx < 0;
+    if (added) { rows.push({ in: inA, out, dst }); idx = rows.length - 1; }
+    let note;
+    if (fresh && c.map === 'EDM' && alloc[n] > 1) note = `NAT ${n} 是对称型：发往新地址，换了个新端口 :${out}`;
+    else if (fresh) note = `NAT ${n} 新开映射：${inA} → 公网 :${out}`;
+    else if (c.map === 'EIM') note = `NAT ${n} 复用映射 :${out}（EIM：同一个 socket 发往哪都用这个口）`;
+    else note = `NAT ${n} 沿用 :${out}（之前往这个地址发过）`;
+    if (added) note += `，记下「去过 ${dst}」`;
+    return { out, idx, note };
+  }
+  function inbound(n, src, dstPort) {
+    const c = cfg[n];
+    return st.nat[n].findIndex(r => r.out === dstPort && (c.filt === 'APDF' ? r.dst === src : ip(r.dst) === ip(src)));
+  }
+  function passNote(n, idx, src) {
+    const r = st.nat[n][idx];
+    if (r.dst === src) return `NAT ${n} 查表：有「去过 ${src}」这一行，放行，目的地址改回内网 ${r.in}`;
+    return `NAT ${n} 只核对源 IP：「去过 ${ip(src)}」对得上（端口不同也算），放行，目的地址改回内网 ${r.in}`;
+  }
+  function dropNote(n, src) {
+    return `NAT ${n} 查表：找不到和 ${src} 对得上的记录（${cfg[n].filt === 'APDF' ? 'IP 和端口都要对上' : '至少要对上 IP'}），丢弃`;
+  }
+  const head = label => label.split(' ')[0];
+
+  function send(h, dst, label, kind, onDeliver) {
+    const fs = [], n = h;
+    const m = outbound(h, dst);
+    const src = PUB[n] + ':' + m.out;
+    fs.push({ from: 'host' + h, to: 'nat' + n, pkt: { label, kind, src: HOST[h].in, dst },
+      after: { pkt: { label, kind, src, dst }, note: m.note, hi: { nat: n, row: m.idx, kind: 'new' } }, state: snap() });
+    if (dst === SRV) {
+      onDeliver && onDeliver(st, src);
+      fs.push({ from: 'nat' + n, to: 'srv', pkt: { label, kind, src, dst },
+        after: { pkt: { label, kind, src, dst }, note: `服务器收到 ${head(label)}，看到的源地址是 ${src}` }, state: snap() });
+      return { fs, delivered: true, src };
+    }
+    const t = ip(dst) === PUB.A ? 'A' : 'B';
+    const idx = inbound(t, src, port(dst));
+    const ask = kind === 'punch';
+    if (idx < 0) {
+      fs.push({ from: 'nat' + n, to: 'nat' + t, pkt: { label, kind, src, dst }, ask,
+        after: { pkt: { label, kind, src, dst }, note: dropNote(t, src), hi: { nat: t, row: -1, kind: 'drop' }, verdict: { at: 'nat' + t, ok: false }, gone: true }, state: snap() });
+      return { fs, delivered: false, src };
+    }
+    fs.push({ from: 'nat' + n, to: 'nat' + t, pkt: { label, kind, src, dst }, ask,
+      after: { pkt: { label, kind, src, dst: HOST[t].in }, note: passNote(t, idx, src), hi: { nat: t, row: idx, kind: 'ok' }, verdict: { at: 'nat' + t, ok: true } }, state: snap() });
+    onDeliver && onDeliver(st, src);
+    fs.push({ from: 'nat' + t, to: 'host' + t, pkt: { label, kind, src, dst: HOST[t].in },
+      after: { pkt: { label, kind, src, dst: HOST[t].in }, note: `${t} 收到 ${head(label)}，来源是 ${src}` }, state: snap() });
+    return { fs, delivered: true, src };
+  }
+
+  function serverSend(h, label, onDeliver) {
+    const fs = [], n = h, dst = st.room[h];
+    const idx = inbound(n, SRV, port(dst));
+    fs.push({ from: 'srv', to: 'nat' + n, pkt: { label, kind: 'sig', src: SRV, dst },
+      after: { pkt: { label, kind: 'sig', src: SRV, dst: HOST[h].in }, note: passNote(n, idx, SRV), hi: { nat: n, row: idx, kind: 'ok' }, verdict: { at: 'nat' + n, ok: true } }, state: snap() });
+    onDeliver && onDeliver(st);
+    fs.push({ from: 'nat' + n, to: 'host' + h, pkt: { label, kind: 'sig', src: SRV, dst: HOST[h].in },
+      after: { pkt: { label, kind: 'sig', src: SRV, dst: HOST[h].in }, note: `${h} 收到 ${head(label)}` }, state: snap() });
+    return { fs };
+  }
+  return { st, snap, send, serverSend };
+}
+
+/* ---------- 剧本：每一步做什么、怎么解释 ---------- */
+function build(sc) {
+  const S = makeSim(sc), cfg = SCEN[sc], steps = [];
+  const push = (t, p, code, fs) => steps.push({ t, p, code, fs, end: fs.length ? fs[fs.length - 1].state : S.snap() });
+
+  push('两台机器，各在一个 NAT 后面',
+    `本机 A 和对端 B 都只有内网地址，外面的人没法主动找到它们。会合服务器有公网 IP，两边都能主动连上它。当前场景：NAT A 是${natType(cfg.A)}，NAT B 是${natType(cfg.B)}。每点一次「下一步」看一个环节，重点盯住下面两张 NAT 表：打洞成不成，全看表里有没有对得上的记录。`,
+    null, []);
+
+  let r = S.send('A', SRV, 'REG demo A 192.168.1.95:40001', 'sig', (st, src) => { st.room.A = src; });
+  push('A 登记：发 REG 给服务器',
+    'A 从 40001 端口发出 REG。经过 NAT A 时，源地址被改写成公网地址，NAT A 表里多了一行。服务器从包上看到的就是这个公网地址。真实程序每 200ms 发一次 REG，这里只画一次。',
+    'lab/punch/main.go:316', r.fs);
+
+  r = S.serverSend('A', 'YOU ' + S.st.room.A, st => { st.know.A.self = st.room.A; });
+  push('服务器照镜子：回 YOU',
+    '服务器把看到的地址原样告诉 A。回包到了 NAT A，表里有「去过服务器」这一行，放行。A 这才知道自己在公网上是什么地址。',
+    'lab/punch/main.go:112', r.fs);
+
+  r = S.send('B', SRV, 'REG demo B 192.168.0.10:40002', 'sig', (st, src) => { st.room.B = src; st.know.B.self = src; });
+  push('B 也登记',
+    `B 做同样的事，NAT B 给它分了 :${port(S.st.room.B)}。服务器也会给 B 回 YOU，这里省略。现在房间里有两个人了。`,
+    'lab/punch/main.go:316', r.fs);
+
+  const fs4 = [];
+  fs4.push(...S.serverSend('A', 'PEER B ' + S.st.room.B, st => { st.know.A.peer = st.room.B; }).fs);
+  fs4.push(...S.serverSend('B', 'PEER A ' + S.st.room.A, st => { st.know.B.peer = st.room.A; }).fs);
+  push('服务器传话：给双方各发一条 PEER',
+    '服务器几乎同时给双方发 PEER，把对方的公网地址告诉它。到这一步只解决了「寻址」：双方知道往哪儿发了。「放行」还没解决：两张 NAT 表里都还没有对方的记录。',
+    'lab/punch/main.go:128', fs4);
+
+  const r5 = S.send('A', S.st.know.A.peer, 'PUNCH A', 'punch', (st, src) => { st.know.B.got = src; });
+  push('A 打洞：PUNCH 发往 B 的公网地址',
+    r5.delivered ? 'NAT B 放行了这个包。'
+      : 'NAT B 从没往 A 发过东西，表里找不到对得上的记录，这个包被丢了。但它没白发：NAT A 表里多了一行「去过 B」，A 这边的门已经开了。',
+    'lab/punch/main.go:328', r5.fs);
+
+  const r6 = S.send('B', S.st.know.B.peer, 'PUNCH B', 'punch', (st, src) => { st.know.A.got = src; });
+  const p6 = {
+    cone: 'NAT B 沿用 :61002，也记下「去过 A」。包到了 NAT A，查表：上一步 A 刚往 183.197.45.114:61002 发过，IP 和端口都对得上，放行。',
+    sym: 'NAT B 是对称型：发往新地址就换新端口，这次从 :61377 出去，不是服务器告诉 A 的 :61002。NAT A 只认「去过 183.197.45.114:61002」，端口对不上，丢弃。',
+    symadf: 'NAT B 是对称型，这次从新端口 :61377 出去。NAT A 只核对源 IP：去过 183.197.45.114，对得上，放行。A 从包上发现 B 的真实端口是 :61377，和服务器说的不一样。',
+  }[sc];
+  push('B 打洞：PUNCH 发往 A 的公网地址', p6, 'lab/punch/main.go:281', r6.fs);
+
+  if (r6.delivered) {
+    const r7 = S.send('A', r6.src, 'ACK A', 'punch', (st, src) => { st.know.B.got = src; st.phase = 'ok'; });
+    push('A 回 ACK，洞打通了',
+      'A 往收到 PUNCH 的来源地址回 ACK。代码用的是包的来源 from，不是服务器给的地址，所以对方端口变了也能回对。NAT B 查表：B 刚往 A 发过，放行。双方都收到了对方的包，打通。',
+      'lab/punch/main.go:283', r7.fs);
+    const r8 = S.send('A', r6.src, 'QUIC 数据', 'data');
+    push('直连传数据，服务器退场',
+      '之后的数据直接在两个公网地址之间走，不再经过服务器。p2pcp 在打洞用的同一个 socket 上跑 QUIC，每 10 秒发一次保活：实测 NAT 映射 60~90 秒不用就会过期（docs/08），表里这一行没了，洞就关了。',
+      'lab/p2pcp/transfer.go:29', r8.fs);
+  } else {
+    const fs7 = [];
+    fs7.push(...S.send('A', S.st.know.A.peer, 'PUNCH A', 'punch').fs);
+    S.st.phase = 'fail';
+    fs7.push(...S.send('B', S.st.know.B.peer, 'PUNCH B', 'punch').fs);
+    push('重试也进不去',
+      '每 200ms 重发一轮，结果一样。A 一直往 :61002 发，NAT B 却只为 A 开了 :61377；B 从 :61377 发，NAT A 却只认 :61002。两边的记录永远对不上。',
+      'lab/punch/main.go:328', fs7);
+    push('超时，换别的办法',
+      'punch 超时后会退出，提示「打洞超时」。现实里还有几条路：猜对方的新端口（-spray 端口预测）、在本方开几百个端口碰运气（生日攻击，见 docs/arch/21-flow-symmetric.mmd），或者退回中继转发。想一想：如果 NAT A 只核对源 IP，第 6 步会怎样？先写下猜测，再切到第三个场景验证。',
+      'lab/punch/main.go:314', []);
+  }
+  return steps;
+}
+
+/* ---------- 渲染 ---------- */
+const $ = id => document.getElementById(id);
+const reduce = matchMedia('(prefers-reduced-motion: reduce)').matches;
+const DUR = reduce ? 0 : 750, PAUSE = reduce ? 0 : 420;
+let sc = 'cone', steps = build(sc), cur = 0, token = 0, pending = null, lastPkt = null;
+const KCOL = { sig: 'var(--sig)', punch: 'var(--accent)', data: 'var(--data)' };
+
+function renderScen() {
+  $('scen').innerHTML = Object.entries(SCEN).map(([k, v]) =>
+    `<button type="button" data-k="${k}" aria-pressed="${k === sc}">${v.name}</button>`).join('');
+}
+$('scen').addEventListener('click', e => {
+  const b = e.target.closest('button'); if (!b || b.dataset.k === sc) return;
+  sc = b.dataset.k; steps = build(sc); renderScen(); show(0);
+});
+
+function natCard(n, state, hi) {
+  const c = SCEN[sc][n], rows = state.nat[n], k = state.know[n];
+  const body = rows.length ? rows.map((r, i) => {
+    const cls = hi && hi.nat === n && hi.row === i ? (hi.kind === 'ok' ? 'hi-ok' : 'hi-new') : '';
+    return `<tr class="${cls}"><td>:${port(r.in)}</td><td>:${r.out}</td><td>${r.dst}</td></tr>`;
+  }).join('') : `<tr><td class="emptyrow" colspan="3">空：还没往外发过包</td></tr>`;
+  const diff = k.got && k.peer && k.got !== k.peer;
+  return `<div class="cardhead"><h3>NAT ${n} <span class="mono" style="font-weight:400;color:var(--muted);font-size:.82rem">${PUB[n]}</span></h3><span class="ntype">${natType(c)}</span></div>
+    <p class="rule">${MAP_RULE[c.map]}<br>${FILT_RULE[c.filt]}</p>
+    <div class="tblwrap"><table><thead><tr><th>内网口（${HOST[n].lanIP}）</th><th>公网口</th><th>去过（对方地址）</th></tr></thead><tbody>${body}</tbody></table></div>
+    <div class="know"><h4>${n === 'A' ? '本机 A' : '对端 B'} 知道的</h4><dl>
+      <dt>我的公网地址</dt><dd>${k.self || '—'}</dd>
+      <dt>服务器说对方在</dt><dd>${k.peer || '—'}</dd>
+      <dt>实际收到对方来自</dt><dd class="${diff ? 'diff' : ''}">${k.got || '—'}${diff ? '（和服务器说的不一样）' : ''}</dd>
+    </dl></div>`;
+}
+function srvCard(state) {
+  const ids = Object.keys(state.room);
+  const list = ids.length ? ids.map(id => `<li>${id} → ${state.room[id]}</li>`).join('') : '<li class="none">还没人登记</li>';
+  let ph = '等待登记', cls = '';
+  if (state.phase === 'ok') { ph = '已打通，服务器不再参与'; cls = 'ok'; }
+  else if (state.phase === 'fail') { ph = '打不通：两边的记录对不上'; cls = 'fail'; }
+  else if (state.know.A.peer && state.know.B.peer) ph = '寻址完成，双方开始打洞';
+  else if (ids.length === 2) ph = '房间里有两个人了';
+  else if (ids.length === 1) ph = '房间里有一个人，等另一个';
+  return `<div class="cardhead"><h3>会合服务器</h3><span class="ntype">房间 demo</span></div>
+    <p class="rule">记下每个人的<b>公网源地址</b>，凑齐两人就互相转告。它不转发数据。</p>
+    <ul class="room">${list}</ul>
+    <div class="phase ${cls}">${ph}</div>`;
+}
+function renderState(state, hi) {
+  $('cardA').innerHTML = natCard('A', state, hi);
+  $('cardB').innerHTML = natCard('B', state, hi);
+  $('cardS').innerHTML = srvCard(state);
+  for (const n of ['A', 'B']) {
+    const el = $('card' + n);
+    el.classList.toggle('flash-bad', !!(hi && hi.nat === n && hi.kind === 'drop'));
+    el.classList.toggle('flash-ok', !!(hi && hi.nat === n && hi.kind === 'ok'));
+  }
+  const ok = state.phase === 'ok', fail = state.phase === 'fail';
+  $('wDirect').classList.toggle('ok', ok);
+  $('wDirect').classList.toggle('fail', fail);
+  $('midT').textContent = ok ? '直连' : (fail ? '公网（打不通）' : '公网');
+  for (const id of ['gSrv', 'wA', 'wB']) $(id).classList.toggle('dim', ok);
+}
+function renderPkt(p) {
+  if (!p) { $('pkt').innerHTML = '<span class="empty">还没有包在路上</span>'; lastPkt = null; return; }
+  const ch = f => lastPkt && lastPkt.label === p.label && lastPkt[f] !== p[f] ? ' changed' : '';
+  $('pkt').innerHTML = `<span class="ptag" style="background:${KCOL[p.kind]}">${p.label}</span>
+    <span class="lbl">源</span><span class="addr${ch('src')}">${p.src}</span><span class="lbl">→ 目的</span><span class="addr${ch('dst')}">${p.dst}</span>`;
+  lastPkt = p;
+}
+function setDot(x, y, p) {
+  const d = $('dot'); d.hidden = false;
+  d.setAttribute('transform', `translate(${x},${y})`);
+  d.querySelector('circle').style.fill = KCOL[p.kind];
+  const t = d.querySelector('text'); t.textContent = p.label.split(' ')[0]; t.style.fill = KCOL[p.kind];
+}
+function setVerdict(v) {
+  const g = $('verd');
+  if (!v) { g.hidden = true; return; }
+  const p = POS[v.at];
+  g.hidden = false;
+  g.setAttribute('transform', `translate(${p.x + 96},${p.y - 34})`);
+  g.querySelector('circle').style.fill = v.ok ? 'var(--ok)' : 'var(--bad)';
+  g.querySelector('text').textContent = v.ok ? '✓' : '✕';
+}
+function renderNarr(i) {
+  const s = steps[i];
+  $('stepno').textContent = `第 ${i} 步 / 共 ${steps.length - 1} 步 · ${SCEN[sc].name}`;
+  if (i === 0) $('stepno').textContent = `开场 · ${SCEN[sc].name}`;
+  $('stitle').textContent = s.t;
+  $('sbody').textContent = s.p;
+  $('scode').innerHTML = s.code ? `对应代码：<code>${s.code}</code>` : '';
+  $('prev').disabled = i === 0;
+  $('next').disabled = i === steps.length - 1;
+  $('next').textContent = i === 0 ? '开始 →' : '下一步 →';
+  $('replay').disabled = !s.fs.length;
+  $('dots').innerHTML = steps.map((_, k) =>
+    `<button type="button" data-k="${k}" class="${k === i ? 'cur' : k < i ? 'done' : ''}" aria-label="第 ${k} 步">${k}</button>`).join('');
+  $('ask').hidden = true; pending = null;
+}
+function showEnd(i) {
+  const s = steps[i], last = s.fs[s.fs.length - 1];
+  renderState(s.end, null);
+  lastPkt = null;
+  renderPkt(last ? last.after.pkt : null);
+  $('note').textContent = last ? last.after.note : '';
+  setVerdict(null);
+  $('dot').hidden = true;
+}
+function show(i) { token++; cur = i; renderNarr(i); showEnd(i); }
+
+const wait = (ms, my) => new Promise(r => setTimeout(() => r(my === token), ms));
+function move(a, b, p, my) {
+  return new Promise(res => {
+    const A = POS[a], B = POS[b], t0 = performance.now();
+    const step = now => {
+      if (my !== token) return res(false);
+      const k = DUR ? Math.min(1, (now - t0) / DUR) : 1, e = k < .5 ? 2 * k * k : 1 - Math.pow(-2 * k + 2, 2) / 2;
+      setDot(A.x + (B.x - A.x) * e, A.y + (B.y - A.y) * e, p);
+      k < 1 ? requestAnimationFrame(step) : res(true);
+    };
+    requestAnimationFrame(step);
+  });
+}
+function askUser(f) {
+  return new Promise(res => {
+    $('ask').hidden = false; $('askBtns').hidden = false;
+    $('askQ').textContent = `${f.pkt.label.split(' ')[0]} 到了 NAT ${f.to.slice(3)}。先猜一下：能进去吗？`;
+    $('askFb').textContent = ''; $('askFb').className = 'fb';
+    pending = guess => {
+      pending = null; $('askBtns').hidden = true;
+      const ok = f.after.verdict.ok, right = guess === ok;
+      $('askFb').textContent = right ? '猜对了。' : (ok ? '没猜对：表里有一行对得上，看高亮的那一行。' : '没猜对：表里找不到和来源对得上的记录。');
+      $('askFb').className = 'fb ' + (right ? 'ok' : 'bad');
+      res();
+    };
+    $('gYes').focus({ preventScroll: true });
+  });
+}
+async function play(i) {
+  const my = ++token; cur = i; renderNarr(i);
+  const prevEnd = i > 0 ? steps[i - 1].end : steps[0].end;
+  renderState(prevEnd, null); setVerdict(null); lastPkt = null; renderPkt(null); $('note').textContent = '';
+  for (const f of steps[i].fs) {
+    renderPkt(f.pkt); setVerdict(null);
+    if (!(await move(f.from, f.to, f.pkt, my))) return;
+    if (f.ask && $('predict').checked) { await askUser(f); if (my !== token) return; }
+    renderState(f.state, f.after.hi);
+    renderPkt(f.after.pkt);
+    $('note').textContent = f.after.note;
+    setVerdict(f.after.verdict);
+    if (f.after.gone) $('dot').hidden = true;
+    if (!(await wait(f.after.verdict ? PAUSE * 2 : PAUSE, my))) return;
+  }
+  setVerdict(null);
+}
+
+$('next').onclick = () => { if (cur < steps.length - 1) play(cur + 1); };
+$('prev').onclick = () => { if (cur > 0) show(cur - 1); };
+$('replay').onclick = () => play(cur);
+$('gYes').onclick = () => pending && pending(true);
+$('gNo').onclick = () => pending && pending(false);
+$('dots').addEventListener('click', e => { const b = e.target.closest('button'); if (b) show(+b.dataset.k); });
+document.addEventListener('keydown', e => {
+  if (e.target.closest('input, textarea')) return;
+  if (e.key === 'ArrowRight') $('next').click();
+  if (e.key === 'ArrowLeft') $('prev').click();
+});
+
+renderScen();
+show(0);
+</script>
