@@ -22,6 +22,37 @@ NAT 带路由器式防火墙：INPUT 链丢弃从 WAN 进来的未请求包。
 
 和 02 章的理论表一致。netem 校验：A 链路加 30ms，B 链路加 20ms±5ms 和 5% 丢包，测得 RTT p50 = 101.5ms，符合"每条链路双向各加一次"的预期（2×30 + 2×20 = 100ms）。
 
+### 1.1 补上受限锥（restricted，2026-11-09）
+
+原来只有 full / port / sym 三档，缺了 ADF（只核对源 IP）。新增 `restricted`：映射和 port 一样（MASQUERADE 保留端口），过滤用一个 nft 动态集合实现——出包时在 forward 链记下「对方 IP . 本方端口」，入包的「源 IP . 目的端口」在集合里就 DNAT 给内网主机，不看源端口。
+
+先确认它真的只核对 IP：`lab.sh script <类型> port filter-check.sh`，peerA 在 5000 端口收包，四次敲门：
+
+| 敲门 | full | restricted | port |
+|---|---|---|---|
+| 阶段 1（A 只联系过 inet）：inet:7777，同 IP、换端口 | ✅ | ✅ | ❌ |
+| 阶段 1：B:4000，陌生 IP | ✅ | ❌ | ❌ |
+| 阶段 2（A 又联系了 B:4000）：B:4000，联系过的 IP + 端口 | ✅ | ✅ | ✅ |
+| 阶段 2：B:4001，同 IP、换端口 | ✅ | ✅ | ❌ |
+
+基线矩阵（不加任何手段，每格 5 次）：
+
+| A \ B | full | restricted | port | sym |
+|---|---|---|---|---|
+| **full** | ✅ 5/5 | ✅ 5/5 | ✅ 5/5 | ✅ 5/5 |
+| **restricted** | ✅ 5/5 | ✅ 5/5 | ✅ 5/5 | ✅ 5/5 |
+| **port** | ✅ 5/5 | ✅ 5/5 | ✅ 5/5 | ❌ 0/5 |
+| **sym** | ✅ 5/5 | ✅ 5/5 | ❌ 0/5 | ❌ 0/5 |
+
+restricted 和 port 的映射完全一样，只差过滤，结果却是 restricted ↔ sym 通、port ↔ sym 不通。日志里能看到原因（`lab.sh run restricted sym -v`）：
+
+```
+会合服务器:  id=B pub=198.51.100.2:38907                       ← B 问会合服务器时的映射
+A:          ✔ connected to B via 198.51.100.2:10051 [收到对方 PUNCH]   ← B 往 A 发包时换成了 10051
+```
+
+A 按会合给的 38907 打过去是错的；B 从 10051 打来的包源 IP 对得上，受限锥放行，A 从源地址学到 10051（peer-reflexive）再回包。端口限制锥核对源端口，10051 不在名单上，丢弃。
+
 ## 2. 发现：Linux NAT 的 conntrack 冲突
 
 `--no-fw` 时（NAT 不丢弃 WAN 来的未请求包），**port ↔ port 也会失败**。抓包看到：

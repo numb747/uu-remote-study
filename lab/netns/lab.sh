@@ -21,6 +21,7 @@
 #
 # NAT 类型:
 #   full  全锥 (EIM + EIF)：保留端口 + 入方向 UDP 全部 DNAT 给内网主机
+#   restricted  受限锥 (EIM + ADF)：保留端口 + 只把「这个端口发去过的 IP」来的入包 DNAT 给内网主机
 #   port  端口限制锥 (EIM + APDF)：Linux MASQUERADE 默认行为
 #   sym   对称·随机端口 (EDM)：MASQUERADE fully-random
 #
@@ -40,7 +41,7 @@
 set -euo pipefail
 
 HERE=$(cd "$(dirname "$0")" && pwd)
-TYPES=(full port sym)
+TYPES=(full restricted port sym)
 
 die() { echo "lab.sh: $*" >&2; exit 2; }
 
@@ -58,6 +59,15 @@ nat_rules() { # <ns> <内网主机 IP> <类型>
 	full)
 		$nft add rule ip nat post oifname wan masquerade
 		$nft add rule ip nat pre iifname wan udp dport 1024-65535 dnat to "$inner"
+		;;
+	restricted)
+		# 受限锥：映射同 port（MASQUERADE 保留端口，外网端口 = 内网端口），过滤只核对源 IP。
+		# 出包时把「对方 IP . 本方端口」记进动态集合；入包只要源 IP 在这个端口的名单上就放进来，不管源端口。
+		$nft add rule ip nat post oifname wan masquerade
+		$nft add set ip nat contacted '{ type ipv4_addr . inet_service; flags dynamic,timeout; timeout 120s; }'
+		$nft add chain ip nat outbound '{ type filter hook forward priority 0; }'
+		$nft add rule ip nat outbound iifname lan oifname wan meta l4proto udp update @contacted '{ ip daddr . udp sport }'
+		$nft add rule ip nat pre iifname wan ip saddr . udp dport @contacted dnat to "$inner"
 		;;
 	*) die "未知 NAT 类型: $type（可选: ${TYPES[*]}）" ;;
 	esac
