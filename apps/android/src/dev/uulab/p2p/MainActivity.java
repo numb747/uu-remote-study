@@ -389,7 +389,7 @@ public class MainActivity extends Activity {
         } catch (Exception ignored) {
         }
         room = p.getProperty("room", "p2pcp");
-        server = p.getProperty("server", "8.140.18.211:7001,8.140.18.211:7000");
+        server = p.getProperty("server", ""); // build.sh 一定会写；万一没有，p2pcp 会报「没有会合服务器」
     }
 
     /**

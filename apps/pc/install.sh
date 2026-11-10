@@ -2,11 +2,13 @@
 # 安装 P2P 直传电脑端：
 #   ~/.local/bin/p2pcp、~/.local/bin/p2p-direct
 #   ~/.config/p2pcp/room              房间密钥（第一次生成；手机 App 构建时读它）
+#   ~/.config/p2pcp/server            会合服务器地址（第一次安装时由 P2P_SERVER 给出；手机 App 构建时也读它）
 #   systemd 用户服务 p2p-direct       常驻接收
 #   启动器「发送到手机（P2P 直传）」、Dolphin 右键「P2P 直传到手机」、图标 p2p-direct
 #
-#   ./install.sh            安装/更新
-#   ./install.sh uninstall  卸载（保留房间密钥和已收到的文件）
+#   P2P_SERVER=1.2.3.4:7001 ./install.sh   第一次安装（服务器端跑 punch server -listen :7001 -relay :3478）
+#   ./install.sh                           更新
+#   ./install.sh uninstall                 卸载（保留房间密钥、服务器地址和已收到的文件）
 set -euo pipefail
 cd "$(dirname "$0")"
 APPS=~/.local/share/applications
@@ -25,6 +27,8 @@ fi
 mkdir -p ~/.local/bin ~/.config/p2pcp "$APPS" "$MENUS" "$(dirname "$ICON")" "$(dirname "$UNIT")"
 [ -f ~/.config/p2pcp/room ] || head -c 12 /dev/urandom | od -An -tx1 | tr -d ' \n' > ~/.config/p2pcp/room
 chmod 600 ~/.config/p2pcp/room
+[ -n "${P2P_SERVER:-}" ] && echo "$P2P_SERVER" > ~/.config/p2pcp/server
+[ -s ~/.config/p2pcp/server ] || { echo "第一次安装要给出会合服务器：P2P_SERVER=IP:7001 ./install.sh"; exit 1; }
 
 (cd ../../lab && CGO_ENABLED=0 go build -trimpath -ldflags "-s -w" -o ~/.local/bin/p2pcp ./p2pcp)
 install -m 755 p2p-direct ~/.local/bin/p2p-direct

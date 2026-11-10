@@ -185,7 +185,7 @@ td.emptyrow { font-family: var(--f-body); color: var(--muted); white-space: norm
         <g>
           <rect class="box nat" x="385" y="166" width="200" height="68" rx="6"></rect>
           <text class="n-t" x="485" y="194">NAT B</text>
-          <text class="n-s" x="485" y="218">183.197.45.114</text>
+          <text class="n-s" x="485" y="218">198.51.100.2</text>
         </g>
         <g>
           <rect class="box" x="15" y="316" width="200" height="68" rx="10"></rect>
@@ -242,7 +242,7 @@ td.emptyrow { font-family: var(--f-body); color: var(--muted); white-space: norm
 <script>
 const SRV = '8.140.18.211:7001';
 const HOST = { A: { in: '192.168.1.95:40001', lanIP: '192.168.1.95' }, B: { in: '192.168.0.10:40002', lanIP: '192.168.0.10' } };
-const PUB = { A: '110.228.186.81', B: '183.197.45.114' };
+const PUB = { A: '110.228.186.81', B: '198.51.100.2' };
 const PORTS = { A: [23456, 23461], B: [61002, 61377] };
 const POS = { srv: { x: 300, y: 56 }, natA: { x: 115, y: 200 }, natB: { x: 485, y: 200 }, hostA: { x: 115, y: 350 }, hostB: { x: 485, y: 350 } };
 const SCEN = {
@@ -374,9 +374,9 @@ function build(sc) {
 
   const r6 = S.send('B', S.st.know.B.peer, 'PUNCH B', 'punch', (st, src) => { st.know.A.got = src; });
   const p6 = {
-    cone: 'NAT B 沿用 :61002，也记下「去过 A」。包到了 NAT A，查表：上一步 A 刚往 183.197.45.114:61002 发过，IP 和端口都对得上，放行。',
-    sym: 'NAT B 是对称型：发往新地址就换新端口，这次从 :61377 出去，不是服务器告诉 A 的 :61002。NAT A 只认「去过 183.197.45.114:61002」，端口对不上，丢弃。',
-    symadf: 'NAT B 是对称型，这次从新端口 :61377 出去。NAT A 只核对源 IP：去过 183.197.45.114，对得上，放行。A 从包上发现 B 的真实端口是 :61377，和服务器说的不一样。',
+    cone: 'NAT B 沿用 :61002，也记下「去过 A」。包到了 NAT A，查表：上一步 A 刚往 198.51.100.2:61002 发过，IP 和端口都对得上，放行。',
+    sym: 'NAT B 是对称型：发往新地址就换新端口，这次从 :61377 出去，不是服务器告诉 A 的 :61002。NAT A 只认「去过 198.51.100.2:61002」，端口对不上，丢弃。',
+    symadf: 'NAT B 是对称型，这次从新端口 :61377 出去。NAT A 只核对源 IP：去过 198.51.100.2，对得上，放行。A 从包上发现 B 的真实端口是 :61377，和服务器说的不一样。',
   }[sc];
   push('B 打洞：PUNCH 发往 A 的公网地址', p6, 'lab/punch/main.go:281', r6.fs);
 

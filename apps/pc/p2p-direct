@@ -8,7 +8,8 @@
 set -euo pipefail
 BIN=~/.local/bin/p2pcp
 ROOM=$(cat ~/.config/p2pcp/room)
-# 会合服务器默认用 p2pcp 内置的那串（同一台服务器的几个端口，每轮换一个，docs/09 第 8 节）；P2P_SERVER 可覆盖
+# 会合服务器：p2pcp 自己读 ~/.config/p2pcp/server（install.sh 写的，可以是同一台服务器的几个端口，每轮换一个，
+# docs/09 第 8 节）；P2P_SERVER 可覆盖
 SRV=(${P2P_SERVER:+-server "$P2P_SERVER"})
 # 开着 sing-box TUN 时，要绑物理网卡的地址才能打洞（否则走的是代理出口）。-bind auto 让 p2pcp 每轮现取 main 表
 # 默认路由那块网卡的地址：换了网络，常驻服务不用重启

@@ -30,6 +30,8 @@ import (
 	"log"
 	"os"
 	"os/signal"
+	"path/filepath"
+	"strings"
 	"sync/atomic"
 	"syscall"
 	"time"
@@ -41,8 +43,19 @@ const (
 	msgNom   = "/PN" // 提名：发送端告诉接收端"就用这条"（两端都有 IPv4 + IPv6 两个 socket 时才需要）
 )
 
-// 默认会合地址：同一台服务器的几个端口，房间共享。7001 放前面：7000 在某台电信 CGNAT 下有毒（docs/09 第 7 节）
-const defaultServers = "8.140.18.211:7001,8.140.18.211:7000"
+// serverConf：没给 -server 时依次看环境变量 P2PCP_SERVER、~/.config/p2pcp/server（apps/pc/install.sh 写的）。
+// 可以写同一台服务器的几个端口，房间共享，每轮换一个；别用 7000 开头，它在某台电信 CGNAT 下有毒（docs/09 第 7 节）
+func serverConf() string {
+	if s := os.Getenv("P2PCP_SERVER"); s != "" {
+		return s
+	}
+	if home, err := os.UserHomeDir(); err == nil {
+		if b, err := os.ReadFile(filepath.Join(home, ".config/p2pcp/server")); err == nil {
+			return strings.TrimSpace(string(b))
+		}
+	}
+	return ""
+}
 
 // 实际发出的打洞包补到 48 字节，别太像异常小包。（2026-10-17 排查电信 CGNAT 下双向全丢时试过，真正的原因是会合
 // 服务器用了 UDP 7000，见 docs/09 第 7 节；填充本身无害，保留）
@@ -89,7 +102,8 @@ func main() {
 	}
 	fs := flag.NewFlagSet(role, flag.ExitOnError)
 	var o opts
-	fs.StringVar(&o.server, "server", defaultServers, "会合服务器 IP:端口，逗号分隔多个时每轮换一个（服务器那边房间共享，docs/09 第 8 节）")
+	fs.StringVar(&o.server, "server", "", "会合服务器 IP:端口，逗号分隔多个时每轮换一个（服务器那边房间共享，docs/09 第 8 节）；"+
+		"不给就读环境变量 P2PCP_SERVER 或 ~/.config/p2pcp/server")
 	fs.StringVar(&o.room, "room", "p2pcp", "房间名，两端要一致（当作共享密钥用：取一个别人猜不到的）")
 	fs.StringVar(&o.bind, "bind", "", "绑定的本机 IP（开着 TUN 代理时用物理网卡地址）；auto = 每轮取 main 表默认路由那块网卡的地址")
 	fs.StringVar(&o.public, "public", "", "本机自己的公网 IP，作为额外候选（1:1 NAT 的云服务器用：会合服务器在本机时看到的是 127.0.0.1）")
@@ -107,6 +121,13 @@ func main() {
 	notify := fs.Bool("notify", false, "用 notify-send 弹桌面通知")
 	fs.Parse(os.Args[2:])
 	log.SetFlags(log.Ltime | log.Lmicroseconds)
+	if o.server == "" {
+		o.server = serverConf()
+	}
+	if o.server == "" {
+		log.Fatal("没有会合服务器：用 -server IP:7001 指定，或者写进 ~/.config/p2pcp/server（也认环境变量 P2PCP_SERVER）。" +
+			"在一台有公网 IP 的机器上跑 punch server -listen :7001 -relay :3478，放行 UDP 7001 和 3478")
+	}
 	o.rep = &reporter{machine: *progress, notify: *notify}
 	o.regEvery = 500 * time.Millisecond
 	exitGracefully()

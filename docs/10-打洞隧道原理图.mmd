@@ -3,7 +3,7 @@ flowchart TB
     direction LR
     a_pc["本机<br/>Wi-Fi，出口 110.228.186.81"]
     a_relay["99-server 上的 RustDesk 中继 hbbr<br/>出方向固定 3Mbps"]
-    a_peer["对端 monkey<br/>家宽，出口 183.197.45.114"]
+    a_peer["对端 monkey<br/>家宽，出口 183.197.x.x"]
     a_pc -->|"RustDesk 打洞失败：报给对方的地址是<br/>sing-box TUN 的 172.18.0.1，对方根本打不到"| a_relay
     a_relay -->|"3.4Mbps：48GB 要 31 小时"| a_peer
   end
@@ -14,7 +14,7 @@ flowchart TB
     b_rdv["会合服务器 8.140.18.211:7001<br/>像一面镜子 + 传话人"]
     b_peer["对端 UDP socket<br/>内网 192.168.0.10:q"]
     b_pc -->|"REG：我在房间里<br/>服务器看到 110.228.186.81:P"| b_rdv
-    b_peer -->|"REG：我也在<br/>服务器看到 183.197.45.114:Q"| b_rdv
+    b_peer -->|"REG：我也在<br/>服务器看到 183.197.x.x:Q"| b_rdv
     b_rdv -.->|"PEER：互相告诉对方的公网地址"| b_pc
     b_rdv -.->|PEER| b_peer
     b_pc <-->|"同时互发打洞包 /PP<br/>各自的 NAT 记下「我往那儿发过」，对方回来的包就放行"| b_peer

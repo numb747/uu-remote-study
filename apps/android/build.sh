@@ -16,7 +16,7 @@ CACHE=~/.cache/uu-remote-study
 JAR=$CACHE/android-35/android.jar
 OUT=out
 ROOM_FILE=~/.config/p2pcp/room
-SERVER=${SERVER:-8.140.18.211:7001,8.140.18.211:7000}  # 同一台服务器的几个端口，p2pcp 每轮换一个
+SERVER=${SERVER:-$(cat ~/.config/p2pcp/server 2>/dev/null || true)}  # 可以是同一台服务器的几个端口，p2pcp 每轮换一个
 
 if [ ! -f "$JAR" ]; then
 	mkdir -p "$CACHE"
@@ -24,6 +24,7 @@ if [ ! -f "$JAR" ]; then
 	(cd "$CACHE" && unzip -q -o platform-35.zip)
 fi
 [ -f "$ROOM_FILE" ] || { echo "缺少 $ROOM_FILE，先运行 apps/pc/install.sh"; exit 1; }
+[ -n "$SERVER" ] || { echo "缺少会合服务器地址：SERVER=IP:7001 ./build.sh，或先运行 apps/pc/install.sh"; exit 1; }
 
 rm -rf "$OUT" && mkdir -p "$OUT"/{res,classes,stage/lib/arm64-v8a,assets}
 
