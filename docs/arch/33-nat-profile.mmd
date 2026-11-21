@@ -1,0 +1,40 @@
+flowchart LR
+  start["画像入口：先查缓存，没命中才现测<br/>cachedProfile / natProfile"]
+  cache["画像缓存 profile.json：只存 IPv4 部分，IPv6 每次现查<br/>键 = 出口 IP + 默认路由网卡和网关 + STUN / 会合清单，30 分钟过期"]
+  subgraph probes["没命中缓存：四项并行，约 1 秒"]
+    p_stun["映射行为：同一个 socket 同时问 N 台公开 STUN，两台回了再等 600ms 就收<br/>stunAll：映射都一样 = EIM，变了 = EDM；顺带看端口保持"]
+    p_srv["会合端口：通不通、有没有毒、低端口段<br/>probeServer"]
+    p_ft["过滤行为：新 socket 向会合端口发 /FT，和 STUN 并行；收到 /F1 后再等 500ms<br/>probeFilter：只有 /F1 = APDF，/F2 也到 = ADF 或 EIF"]
+    p_v6["IPv6：有没有全局地址<br/>global6"]
+  end
+  stun_pub["公共 STUN 服务器 ×N"]
+  srv_ft["会合服务器 /FT 应答：收包端口回 /F1，另一个监听端口回 /F2<br/>runServer"]
+  classify["分类：open / cone / port / sym；过滤没测出来时 EIM 记 eim，少于两台 STUN 回就是未知<br/>classify + refine"]
+  out_flag["编码成标志 nat=类别.v6，对方用 parseNat 解<br/>profile.flag"]
+  out_report["写进体检报告<br/>人读的一行一项"]:::planned
+
+  start -->|"先查"| cache
+  start -->|"没命中"| p_stun
+  start -->|"没命中"| p_srv
+  start -->|"没命中"| p_ft
+  start -->|"没命中"| p_v6
+  p_stun -->|"STUN Binding"| stun_pub
+  p_ft -->|"/FT"| srv_ft
+  srv_ft -->|"从 7001 和 7000 各回一包"| p_ft
+  p_stun --> classify
+  p_srv --> classify
+  p_ft --> classify
+  p_v6 --> classify
+  classify -->|"写入"| cache
+  classify --> out_flag
+  classify --> out_report
+
+%% @src start lab/p2pcp/profilecache.go func cachedProfile(
+%% @src p_stun lab/p2pcp/stun.go func stunAll(
+%% @src classify lab/p2pcp/natprofile.go func classify(
+%% @src out_flag lab/p2pcp/natprofile.go func (p profile) flag()
+%% @src p_ft lab/p2pcp/natprofile.go func probeFilter(
+%% @src srv_ft lab/punch/main.go case len(f) == 2 && f[0] == "/FT"
+%% @src p_srv lab/p2pcp/check.go func probeServer(
+%% @src p_v6 lab/p2pcp/rdv.go func global6(
+classDef planned stroke:#bb9af7,stroke-width:2px,stroke-dasharray:3 4

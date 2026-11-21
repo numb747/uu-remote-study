@@ -1,0 +1,49 @@
+flowchart TD
+  entry["入口：send / recv / daemon<br/>connect 开始时后台测画像，不等它"]
+  entry_check["check -room：两端各跑一次<br/>完整双端体检，不用缓存"]:::planned
+  profile["本机 NAT 画像：先查缓存，没命中才现测（约 600ms），在后台跑<br/>startPreflight / cachedProfile"]
+  cache["画像缓存：按网络指纹分条，30 分钟过期，flock 合并写<br/>~/.cache/p2pcp/profile.json"]
+  reg["会合 /R2：标志里带 nat=画像；第一次注册前最多等 50ms，画像一测好就补注册<br/>connectOnce，打洞时 listen 也收重推的 /P"]
+  rdv["会合 + 中继 8.140.18.211<br/>会合 7001 / 7000，中继 3478"]
+  predict["组合预测：4×4 矩阵 + IPv6；第一次收到 /P 时做、只报一次<br/>predict / preflight.sawPeer"]
+  punch["打洞一轮（4 秒）<br/>connectOnce"]
+  policy["按预测定重试：能通 → 照旧两轮不通才中继；不通 → 一轮不通就请求中继<br/>connect 的 early；-relay off 时不变"]
+  relay["中继兜底<br/>joinRelay"]
+  xfer["传输：QUIC 接管 + 通道绑定认证 + 4MB 分块续传<br/>dialPeer / sendSession"]
+  upgrade["后台升级：走中继时隔一段再打洞，升级房间由 EKM 派生<br/>打通就在直连上重开会话，have 只报缺的块"]:::planned
+  pairtest["实测：打通后测 RTT / 丢包，再测中继<br/>checkPair"]:::planned
+  report["报告：两端画像、预测、实际结果、不通的原因<br/>-progress 输出 @CHECK 行"]:::planned
+  history["预测记录<br/>~/.cache/p2pcp/history.jsonl"]:::planned
+
+  entry -->|"后台，不等"| profile
+  entry_check -->|"现测"| profile
+  profile -->|"按网络指纹读 / 写"| cache
+  profile -->|"nat=类别.v6"| reg
+  reg -->|"UDP /R2"| rdv
+  rdv -->|"/P 带对方的 nat="| predict
+  predict -->|"开始打洞"| punch
+  punch -->|"直连"| xfer
+  punch -.->|"这一轮不通"| policy
+  policy -.->|"再打一轮"| punch
+  policy -.->|"改走中继"| relay
+  relay -->|"经中继"| xfer
+  xfer -.->|"走中继时"| upgrade
+  upgrade -.->|"打通：直连上重开会话"| xfer
+  punch -->|"check -room 时"| pairtest
+  predict -->|"预测进报告"| report
+  xfer -->|"结束时"| report
+  pairtest --> report
+  report -->|"追加一行：预测 vs 实际"| history
+
+%% @src entry lab/p2pcp/main.go case "send":
+%% @src profile lab/p2pcp/preflight.go func startPreflight(
+%% @src reg lab/p2pcp/rdv.go reg := func() []byte {
+%% @src predict lab/p2pcp/predict.go func predict(me, peer profile)
+%% @src policy lab/p2pcp/rdv.go early := punchTOs == 1 && o.pre.predictedNo()
+%% @src rdv lab/punch/main.go func runServer
+%% @src punch lab/p2pcp/rdv.go func connectOnce(
+%% @src relay lab/p2pcp/rdv.go func joinRelay(
+%% @src xfer lab/p2pcp/link.go func dialPeer(
+%% @link profile 33-nat-profile.mmd
+%% @link xfer 24-flow-p2pcp.mmd
+classDef planned stroke:#bb9af7,stroke-width:2px,stroke-dasharray:3 4

@@ -9,11 +9,11 @@ flowchart TD
     peer["收到 /P → 对方候选 + 标志<br/>打洞期间每 500ms 继续注册，打完才 /U2：PEER 丢一个还有下一个"]:::changed
   end
   subgraph pass["② 放行：打洞（IPv4、IPv6 同时）"]
-    punch["每 20ms 向全部候选发 /PP；收到对方 /PP 回 /PA 并反发一次（触发检查）<br/>v4 候选走 v4 socket，v6 走 v6 socket"]
+    punch["每 20ms 向全部候选发 /PP；收到对方 /PP 回 /PA 并反发一次（触发检查）<br/>来源不在候选里（对方是对称型）、重推的 /P 里对方换了新地址，都加进目标一直打"]:::changed
     chosen["发送端：第一个 /PA 定路径<br/>用包的源地址作对端（prflx），关掉另一个 socket"]
     nom["提名：发送端在选中路径上发 3 个 /PN<br/>接收端有两个 socket 时等 /PN 或首个 QUIC Initial"]
     retry["4 秒不通、坏端口或失联 → 换新端口、换下一个会合地址重来<br/>最多 6 轮，失败时分层诊断"]
-    relay["发送端两轮打不通：/R2 带 relay 标志，双方都去中继报到<br/>joinRelay：/L 房间号.发送端id d|l → /LK"]:::changed
+    relay["发送端两轮打不通（体检预测打不通时一轮）：/R2 带 relay 标志；对方打洞中途从重推的 /P 看到就跟过去<br/>goRelay / joinRelay：/L 房间号.发送端id d|l → /LK"]:::changed
   end
   subgraph data["③ 传输：QUIC 接管同一个 socket"]
     quic["newLink：quic.Transport 接管（quietConn 把发送错误当丢包）<br/>后台 readNonQUIC 回应迟到的 /PP；SIGTERM 时 closeLive"]:::changed
@@ -44,7 +44,7 @@ flowchart TD
 %% @src entry apps/pc/p2p-direct case ${1:-} in
 %% @src rid lab/p2pcp/auth.go func roomID(
 %% @src rdv lab/punch/main.go func runServer
-%% @src reg lab/p2pcp/rdv.go reg := fmt.Sprintf("/R2
+%% @src reg lab/p2pcp/rdv.go return []byte(fmt.Sprintf("/R2
 %% @src you lab/p2pcp/rdv.go f[0] == "/Y"
 %% @src peer lab/p2pcp/rdv.go // 打洞期间继续每 500ms 注册一次
 %% @src punch lab/p2pcp/rdv.go via.WriteToUDP(pktPunch, a)

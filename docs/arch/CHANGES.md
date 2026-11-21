@@ -1,3 +1,9 @@
+## 2026-11-21 · 设计中：先体检、再直传（arch-design）
+
+- 新增设计：`DESIGN.md`，新图 26-flow-preflight（体检 → 会合交换画像 → 预测 → 打洞 / 中继 → 后台升级 → 报告）和 33-nat-profile（本机画像怎么测），新节点都是 `planned`。
+- 总览：加 planned 节点 `preflight`（链到 26 号图）。为腾名额，`holepunch` 和 `transport` 合成「实验工具 ×6」`tools`，细节仍在 10-modules。
+- 注意：地图仍基于 ac3a392，之后 6 个提交（netns restricted、handpunch、演示页、文章、去掉内置服务器地址等）没有同步进来，`@commit` 没动。
+
 ## 2026-11-07 · a85cb98+dirty → ac3a392+dirty
 
 - p2pcp v2 拆出三个文件：会合 + 打洞 + 中继兜底在 rdv.go，QUIC 接管 socket 在 link.go，房间号和通道绑定认证在 auth.go。模块图把原来的 p2p_connect / p2p_xfer 改成 p2p_connect、p2p_link、p2p_xfer 三个节点（新增 p2p_link），p2p_tunnel 多了一条直接到 p2p_connect 的边（迁移时打新洞）。
