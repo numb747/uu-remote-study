@@ -13,7 +13,6 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
-	"syscall"
 	"time"
 )
 
@@ -51,10 +50,7 @@ func updateProfileCache(path, fp string, e cachedEntry) {
 	if os.MkdirAll(filepath.Dir(path), 0o700) != nil {
 		return
 	}
-	if lk, err := os.OpenFile(path+".lock", os.O_CREATE|os.O_RDWR, 0o600); err == nil {
-		defer lk.Close()
-		syscall.Flock(int(lk.Fd()), syscall.LOCK_EX) // 关文件时自动释放
-	}
+	defer lockFile(path + ".lock")()
 	m := loadProfileCache(path)
 	m[fp] = e
 	saveProfileCache(path, m)

@@ -285,7 +285,7 @@ func closeLive() {
 
 // dialPeer 以发送端身份在房间里打洞，然后在同一个 socket 上 QUIC Dial、认证。
 func dialPeer(o opts, alpn string) (*link, error) {
-	secret := roomSecret(o.room)
+	secret := roomKey(o)
 	s, err := connect(o, roomID(secret), "send")
 	if err != nil {
 		return nil, err
@@ -306,7 +306,7 @@ func acceptPeer(o opts, alpn string) (*link, error) {
 	if err != nil {
 		return nil, err
 	}
-	secret := roomSecret(o.room)
+	secret := roomKey(o)
 	s, err := connect(o, roomID(secret), "recv")
 	if err != nil {
 		return nil, err

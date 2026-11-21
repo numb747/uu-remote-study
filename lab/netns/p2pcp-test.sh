@@ -11,6 +11,7 @@
 #   tunnel   expose/forward 回显；中途三次把 forward 正在用的 UDP 端口封掉，每次都迁移到新洞上，TCP 会话不断
 #   upgrade  forward 先强制走中继，15 秒后自己打通直连并迁移过去，TCP 会话不断
 #   xferup   传文件先强制走中继（中继限速 3Mbit，像 99-server），15 秒后后台打通直连，在直连上重开会话续传完（接收端 recv）
+#   pair     通讯录：A 出邀请码、B 加好友（第二次用被拒），两边 send -to 互发、按好友分目录，B 删掉 A 之后 A 发不进来
 #   xferblock 同上，但前 20 秒直连被封：第一次升级失败，下一次（约 50 秒）才升级成功（接收端 daemon）
 #   preflight 体检：两端的画像（按 $NAT_A / $NAT_B 核对类别）和组合预测，再传一个小文件
 #   checkpair 两端同时 p2pcp check -room：报告里的预测、实测、往返、中继、结论要和 NAT 组合对得上
@@ -23,7 +24,7 @@ B=$BIN_DIR
 W=$(mktemp -d /tmp/p2pcp-test.XXXX)
 SRV=192.0.2.1:7001,192.0.2.1:7000
 ROOM=lab-$RANDOM-$RANDOM
-TESTS=${TESTS:-preflight desync checkpair send resume reconn tunnel upgrade xferup xferblock}
+TESTS=${TESTS:-preflight desync checkpair send resume reconn tunnel upgrade xferup xferblock pair}
 A() { ip netns exec peerA "$@"; }
 Bn() { ip netns exec peerB "$@"; }
 # 后台跑：$! 就是 p2pcp 进程本身（ip netns exec 会 exec 过去），kill 得到
@@ -390,6 +391,45 @@ t_xferblock() {
 	local hist=$XDG_CACHE_HOME/p2pcp/history.jsonl
 	grep '"upgraded_via"' "$hist" | grep -q '"wrong":true' && bad "强制中继被记成预测错" ||
 		ok "强制中继不算预测错（$(grep -c '"forced":true' "$hist") 条 forced 记录）"
+}
+
+t_pair() {
+	echo "== pair：邀请码加好友、send -to 互发、删好友（natA=$NAT_A natB=$NAT_B）"
+	local P="$B/p2pcp" CA="$W/cfgA" CB="$W/cfgB" code sa sb
+	A "$P" id -config "$CA" -name 小A >/dev/null
+	Bn "$P" id -config "$CB" -name 小B >/dev/null
+	bgA "$P" serve -config "$CA" -o "$W/pairA" >"$W/pair-serveA.log" 2>&1
+	sa=$!
+	bgB "$P" serve -config "$CB" -o "$W/pairB" >"$W/pair-serveB.log" 2>&1
+	sb=$!
+	code=$(A "$P" invite -config "$CA" -server "$SRV" -progress 2>/dev/null | sed -n 's/^@INVITE //p')
+	[[ $code == p2pcp://join/* ]] && ok "邀请码 ${code:0:30}…" || bad "没拿到邀请码"
+	sleep 2.5 # serve 每 2 秒看一次通讯录
+	Bn "$P" join -config "$CB" "朋友发来：$code" >"$W/pair-join1.log" 2>&1 && grep -q '已加好友「小A」' "$W/pair-join1.log" &&
+		ok "B 加上了小A" || bad "B 没加上：$(tail -n 2 "$W/pair-join1.log" | tr '\n' '|')"
+	# 第二次用：邀请方还没发现邀请码用掉时，回「用过了」；已经发现了就不再听那个房间，20 秒后报连不上
+	Bn "$P" join -config "$CB" "$code" >"$W/pair-join2.log" 2>&1
+	grep -q '邀请码已经用过\|连不上邀请方' "$W/pair-join2.log" && ok "邀请码第二次用被拒：$(grep -o '邀请码已经用过[^，]*\|连不上邀请方[^（]*' "$W/pair-join2.log" | head -1)" ||
+		bad "第二次用没被拒：$(tail -n 1 "$W/pair-join2.log")"
+	A "$P" contacts -config "$CA" | grep -q '^小B ' && ok "A 的通讯录里有小B" || bad "A 的通讯录里没有小B"
+	sleep 2.5
+	echo from-A >"$W/fromA.txt"
+	echo from-B >"$W/fromB.txt"
+	A "$P" send -config "$CA" -to 小B "$W/fromA.txt" >"$W/pair-sendA.log" 2>&1
+	Bn "$P" send -config "$CB" -to 小a "$W/fromB.txt" >"$W/pair-sendB.log" 2>&1
+	cmp -s "$W/fromA.txt" "$W/pairB/小A/fromA.txt" && cmp -s "$W/fromB.txt" "$W/pairA/小B/fromB.txt" &&
+		ok "互发成功，按好友分目录（A → B $(grep -o '已连上 [^ ]*' "$W/pair-sendA.log" | tail -1)）" ||
+		bad "互发不对：$(find "$W/pairA" "$W/pairB" -type f | tr '\n' ' ')"
+	[[ ! -e $W/pairA/小B/fromA.txt ]] && ok "没有发给自己" || bad "A 的文件落进了自己的收件目录"
+	Bn "$P" contacts -config "$CB" rm 小A >/dev/null
+	sleep 2.5
+	if A "$P" send -config "$CA" -to 小B -timeout 6s "$W/fromA.txt" >"$W/pair-sendA2.log" 2>&1; then
+		bad "B 删了小A，A 还能发进来"
+	else
+		ok "B 删了小A 之后，A 发不进来：$(grep -o '等了[^（]*' "$W/pair-sendA2.log" | head -1)"
+	fi
+	kill $sa $sb 2>/dev/null
+	wait $sa $sb 2>/dev/null
 }
 
 for t in $TESTS; do "t_$t"; done

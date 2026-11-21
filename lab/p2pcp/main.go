@@ -6,6 +6,15 @@
 //	p2pcp check                                   网络体检：会合端口通不通、有没有"毒端口"、NAT 映射、IPv6、中继（check.go）
 //	p2pcp check -room demo                        两端各跑一次：双端体检，画像、预测、实际打洞、往返和丢包、中继（check.go）
 //	p2pcp expose  -room demo [-to 127.0.0.1:22]       常驻：把本机一个 TCP 端口经打洞暴露给对方（tunnel.go）
+//
+// 通讯录模式（pair.go、contacts.go）：每台设备有自己的设备密钥，好友之间的房间密钥由两边的密钥算出来，不用 -room：
+//
+//	p2pcp id [-name 设备名]                        看 / 改本机的设备名和设备 ID
+//	p2pcp invite [-qr 图片.png | -qr -]            生成邀请码（24 小时有效，用一次作废），发给朋友
+//	p2pcp join <邀请码>                            用朋友给的邀请码加好友
+//	p2pcp contacts [rm 名字 | rename 旧名 新名]     好友列表
+//	p2pcp send -to 好友 文件...                    发给好友
+//	p2pcp serve [-o 目录]                          常驻接收所有好友发来的文件（按好友分目录），也替 invite 等对方来加好友
 //	p2pcp forward -room demo [-listen 127.0.0.1:2223] 本机端口转发到 expose 那端，比如 rsync 走 ssh -p 2223
 //
 // 分层：会合 + 打洞 + 中继兜底（rdv.go）→ QUIC 接管 socket（link.go）→ 用房间密钥做通道绑定认证（auth.go）
@@ -94,7 +103,15 @@ type opts struct {
 	preWait  time.Duration   // 第一次注册前最多等本机画像多久（0 = 50ms；check -room 要等它测完）
 	roomSet  bool            // 命令行给了 -room（check 带 -room 时做双端体检）
 	quit     <-chan struct{} // 关闭时 connectOnce 不再等对方（升级房间里的接收端，upgrade.go）
-	rep      *reporter
+	// 通讯录模式（pair.go）
+	config    string        // 身份和通讯录的目录（默认 ~/.config/p2pcp）
+	friend    string        // send / check -to 的好友名
+	secret    []byte        // 房间密钥：配对密钥或邀请密钥；nil 时由 -room 派生（roomKey）
+	name      string        // id -name：改设备名；join -name：给新好友起的名字
+	qr        string        // invite -qr：二维码写到这个 PNG（- = 画在终端里）
+	ttl       time.Duration // invite：邀请码有效期
+	serverSet bool          // 命令行给了 -server（send -to 时就不用好友记录里的会合地址）
+	rep       *reporter
 }
 
 func main() {
@@ -103,7 +120,7 @@ func main() {
 	}
 	role := os.Args[1]
 	switch role {
-	case "send", "recv", "daemon", "check", "expose", "forward":
+	case "send", "recv", "daemon", "check", "expose", "forward", "serve", "id", "invite", "join", "contacts":
 	default:
 		usage()
 	}
@@ -126,18 +143,37 @@ func main() {
 	fs.StringVar(&o.stun, "stun", stunDef, "体检用的公开 STUN（IP:端口，逗号分隔，至少两台、IP 不同）；off = 不体检。也认环境变量 P2PCP_STUN")
 	fs.StringVar(&o.cc, "cc", "bbr", "发送端：拥塞控制 bbr | cubic | brutal:45M（见 cc.go）")
 	fs.StringVar(&o.out, "o", ".", "接收端：保存目录")
-	fs.StringVar(&o.to, "to", "127.0.0.1:22", "expose：对方开的每条流都接到这个 TCP 地址")
+	if role == "expose" {
+		fs.StringVar(&o.to, "to", "127.0.0.1:22", "expose：对方开的每条流都接到这个 TCP 地址")
+	} else {
+		fs.StringVar(&o.friend, "to", "", "send / check：发给通讯录里的这个好友（不用 -room）")
+	}
+	fs.StringVar(&o.config, "config", "", "身份和通讯录的目录（默认 ~/.config/p2pcp；安卓 App 给自己的私有目录）")
+	fs.StringVar(&o.name, "name", "", "id：改本机的设备名；join：给新好友起名字（默认用对方的设备名）")
+	fs.StringVar(&o.qr, "qr", "", "invite：二维码写成这个 PNG；- = 画在终端里")
+	fs.DurationVar(&o.ttl, "ttl", inviteTTL, "invite：邀请码有效期")
 	fs.StringVar(&o.listen, "listen", "127.0.0.1:2223", "forward：本地监听地址")
 	fs.DurationVar(&o.timeout, "timeout", 60*time.Second, "等对方的超时（daemon 模式下无效）")
 	progress := fs.Bool("progress", false, "在 stdout 输出机器可读的进度行")
 	notify := fs.Bool("notify", false, "用 notify-send 弹桌面通知")
 	fs.Parse(os.Args[2:])
-	fs.Visit(func(f *flag.Flag) { o.roomSet = o.roomSet || f.Name == "room" })
+	timeoutSet := false
+	fs.Visit(func(f *flag.Flag) {
+		o.roomSet = o.roomSet || f.Name == "room"
+		o.serverSet = o.serverSet || f.Name == "server"
+		timeoutSet = timeoutSet || f.Name == "timeout"
+	})
+	if role == "join" && !timeoutSet {
+		// 邀请方在线时 1 秒内就配上；邀请码用过 / 过期后邀请方不再听那个房间，别让朋友干等 1 分钟
+		o.timeout = 20 * time.Second
+	}
 	log.SetFlags(log.Ltime | log.Lmicroseconds)
 	if o.server == "" {
 		o.server = serverConf()
 	}
-	if o.server == "" {
+	// 不碰网络的命令、会合地址另有来处的命令（join 听邀请码的，send -to 听好友记录的，serve 每个好友各有地址）不要求 -server
+	needServer := !(role == "id" || role == "contacts" || role == "join" || role == "serve" || o.friend != "")
+	if o.server == "" && needServer {
 		log.Fatal("没有会合服务器：用 -server IP:7001 指定，或者写进 ~/.config/p2pcp/server（也认环境变量 P2PCP_SERVER）。" +
 			"在一台有公网 IP 的机器上跑 punch server -listen :7001 -relay :3478，放行 UDP 7001 和 3478")
 	}
@@ -146,12 +182,32 @@ func main() {
 	exitGracefully()
 
 	var err error
+	if o.friend != "" && (role == "send" || role == "check") {
+		if err := resolveFriend(&o, role); err != nil {
+			o.rep.fail(err)
+			os.Exit(1)
+		}
+		o.roomSet = true // check -to 好友 = 和这个好友的双端体检
+	}
 	switch role {
 	case "send":
 		if fs.NArg() == 0 {
 			log.Fatal("send 需要文件参数")
 		}
 		err = send(o, fs.Args())
+	case "serve":
+		err = serve(o)
+	case "id":
+		err = cmdID(o)
+	case "invite":
+		err = cmdInvite(o)
+	case "join":
+		if fs.NArg() != 1 {
+			log.Fatal("用法：p2pcp join <邀请码>")
+		}
+		err = cmdJoin(o, fs.Arg(0))
+	case "contacts":
+		err = cmdContacts(o, fs.Args())
 	case "recv":
 		err = recv(o)
 	case "check":
@@ -171,13 +227,25 @@ func main() {
 
 // keepServing 常驻（daemon、expose）：在房间里等对方，每接上一个就交给 serve 在后台处理，自己马上回房间接着等。
 // 所以可以同时服务好几个对端；对方换网、崩溃后重新连过来，也不用等旧连接超时。
-// 5 秒注册一次就够了（家用路由器映射寿命 60 秒以上，docs/08）。对方一注册，服务器会立刻把 PEER 推过来
+// 5 秒注册一次就够了（家用路由器映射寿命 60 秒以上，docs/08）。对方一注册，服务器会立刻把 PEER 推过来。
+// o.quit 关闭时退出（serve 删了好友、邀请用掉了）；waiting 为空时不报状态（serve 同时听很多房间，由它统一报）
 func keepServing(o opts, waiting string, accept func(opts) (*link, error), serve func(*link)) {
 	o.timeout, o.regEvery = 0, 5*time.Second
 	backoff := time.Duration(0)
 	var active atomic.Int32 // 正在服务的对端数：有人在传时不报"等待"，免得盖掉界面上的进度
+	pause := func(d time.Duration) {
+		select {
+		case <-o.quit:
+		case <-time.After(d):
+		}
+	}
 	for {
-		if active.Load() == 0 {
+		select {
+		case <-o.quit:
+			return
+		default:
+		}
+		if active.Load() == 0 && waiting != "" {
 			o.rep.state(waiting)
 		}
 		l, err := accept(o)
@@ -187,21 +255,25 @@ func keepServing(o opts, waiting string, accept func(opts) (*link, error), serve
 			active.Add(1)
 			go func() {
 				serve(l)
-				if active.Add(-1) == 0 {
+				if active.Add(-1) == 0 && waiting != "" {
 					o.rep.state(waiting)
 				}
 			}()
+		case errors.Is(err, errStopped):
+			return
 		case errors.Is(err, errNoRendezvous):
 			// 空等时连不上会合服务器（断网、换网络、服务器重启）：没人在用，不弹失败通知，只更新状态，
 			// 重试间隔从 5 秒拉长到 1 分钟，网络回来后最多一分钟内自己恢复
 			backoff = min(max(2*backoff, 5*time.Second), time.Minute)
 			log.Print(err)
-			o.rep.state(fmt.Sprintf("连不上会合服务器，%v 后重试", backoff))
-			time.Sleep(backoff)
+			if waiting != "" {
+				o.rep.state(fmt.Sprintf("连不上会合服务器，%v 后重试", backoff))
+			}
+			pause(backoff)
 		default:
 			backoff = 0
 			o.rep.fail(err)
-			time.Sleep(time.Second)
+			pause(time.Second)
 		}
 	}
 }
@@ -221,6 +293,7 @@ func exitGracefully() {
 
 func usage() {
 	fmt.Println("usage: p2pcp send|recv|daemon|check|expose|forward [flags] [文件...]")
+	fmt.Println("       p2pcp id | invite | join <邀请码> | contacts | send -to 好友 文件... | serve   通讯录模式")
 	fmt.Println("       p2pcp check              本机这一侧的网络体检")
 	fmt.Println("       p2pcp check -room 名字    两端各跑一次：双端体检（画像、预测、实际打洞、往返和丢包、中继）")
 	os.Exit(2)

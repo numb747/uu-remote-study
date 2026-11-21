@@ -174,7 +174,7 @@ func checkPair(o opts) error {
 	if o.stun == "off" || o.stun == "" {
 		o.stun = defaultSTUN // 双端体检的意义就在画像和预测，不许关
 	}
-	secret := roomSecret(o.room)
+	secret := roomKey(o) // check -to 好友时是配对密钥
 	tc, err := selfSigned(checkALPN) // 先生成：打通之后再生成，手机上要一两百毫秒，对方的握手包就在缓冲区里干等
 	if err != nil {
 		return err

@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"crypto/tls"
 	"encoding/json"
@@ -8,6 +9,7 @@ import (
 	"io"
 	"net"
 	"os"
+	"path/filepath"
 	"reflect"
 	"strings"
 	"sync"
@@ -642,5 +644,112 @@ func TestForcedRelayNotWrong(t *testing.T) {
 	}
 	if rec.Predict != predYes || !rec.Forced || rec.Wrong || !strings.Contains(resultLine(rec), "强制走中继，不比对") {
 		t.Fatalf("强制中继不该算预测错：%+v / %s", rec, resultLine(rec))
+	}
+}
+
+// 通讯录（contacts.go）：配对密钥两边一致、按方向分收件房间、邀请码、通讯录的增删找
+func TestPairSecret(t *testing.T) {
+	dir := t.TempDir()
+	a, err := loadIdentity(filepath.Join(dir, "a"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	b, _ := loadIdentity(filepath.Join(dir, "b"))
+	c, _ := loadIdentity(filepath.Join(dir, "c"))
+	again, _ := loadIdentity(filepath.Join(dir, "a"))
+	if !bytes.Equal(again.Priv, a.Priv) {
+		t.Fatal("第二次读身份应该是同一把私钥")
+	}
+	ab, _ := pairSecret(a, b.pub())
+	ba, _ := pairSecret(b, a.pub())
+	ac, _ := pairSecret(a, c.pub())
+	if len(ab) != 32 || !bytes.Equal(ab, ba) || bytes.Equal(ab, ac) {
+		t.Fatal("配对密钥：两边要一致，不同好友要不同")
+	}
+	toA, toB := inboxSecret(ab, a.pub()), inboxSecret(ba, b.pub())
+	if bytes.Equal(toA, toB) || bytes.Equal(toA, ab) {
+		t.Fatal("两个方向的收件房间要不同，也不能等于配对密钥本身")
+	}
+	if _, err := pairSecret(a, []byte("short")); err == nil {
+		t.Fatal("坏公钥应该报错")
+	}
+}
+
+func TestInviteCode(t *testing.T) {
+	secret := bytes.Repeat([]byte{7}, 16)
+	code := encodeInvite(secret, "8.140.18.211:7001,8.140.18.211:7000")
+	for _, text := range []string{code, "微信转发：" + code + " 快加我", strings.ToLower(code)} {
+		s, srv, err := parseInvite(text)
+		if err != nil || !bytes.Equal(s, secret) || srv != "8.140.18.211:7001,8.140.18.211:7000" {
+			t.Fatalf("%q 解不出来：%v %q", text, err, srv)
+		}
+	}
+	if _, _, err := parseInvite(code[:30]); err == nil || !strings.Contains(err.Error(), "不完整") {
+		t.Fatalf("截断的邀请码应报不完整：%v", err)
+	}
+	if _, _, err := parseInvite("随便一段字"); err == nil {
+		t.Fatal("没有邀请码应报错")
+	}
+	v2 := "p2pcp://join/" + b32.EncodeToString(append([]byte{2}, bytes.Repeat([]byte{1}, 20)...))
+	if _, _, err := parseInvite(v2); err == nil || !strings.Contains(err.Error(), "升级") {
+		t.Fatalf("新版本邀请码应提示升级：%v", err)
+	}
+}
+
+func TestBook(t *testing.T) {
+	var b book
+	k1, k2 := bytes.Repeat([]byte{1}, 32), bytes.Repeat([]byte{2}, 32)
+	if n := b.addContact(contact{Name: "小明/的:手机", Pub: k1, Server: "s1"}); n != "小明的手机" {
+		t.Fatalf("名字里的路径字符要去掉：%q", n)
+	}
+	if n := b.addContact(contact{Name: "小明的手机", Pub: k2}); n != "小明的手机 (2)" {
+		t.Fatalf("重名要加后缀：%q", n)
+	}
+	if n := b.addContact(contact{Name: "别的名字", Pub: k1, Server: "s2"}); n != "小明的手机" || len(b.Contacts) != 2 || b.Contacts[0].Server != "s2" {
+		t.Fatalf("同一个公钥再加一次应只更新会合地址：%q %+v", n, b.Contacts)
+	}
+	if c, err := b.find("小明的手机 (2)"); err != nil || !bytes.Equal(c.Pub, k2) {
+		t.Fatal("按全名找")
+	}
+	if c, err := b.find(deviceID(k2)[:5]); err != nil || !bytes.Equal(c.Pub, k2) {
+		t.Fatalf("按设备 ID 前缀找：%v", err)
+	}
+	if _, err := b.find("小红"); err == nil || !strings.Contains(err.Error(), "现有好友") {
+		t.Fatalf("找不到时列出好友：%v", err)
+	}
+	ivs := liveInvites([]pendingInvite{{Expires: time.Now().Add(time.Hour)}, {Expires: time.Now().Add(-time.Second)}})
+	if len(ivs) != 1 {
+		t.Fatal("过期的邀请要去掉")
+	}
+}
+
+// 互换名片：正常互换；邀请方拒绝时被邀请方拿到原因，拿不到名片
+func TestCards(t *testing.T) {
+	a := card{V: 1, Name: "A", Pub: bytes.Repeat([]byte{1}, 32)}
+	b := card{V: 1, Name: "B", Pub: bytes.Repeat([]byte{2}, 32)}
+	for _, reject := range []bool{false, true} {
+		c, s := quicPair(t)
+		got := make(chan card, 1)
+		go func() {
+			peer, _ := serveCards(s, a, func(card) error {
+				if reject {
+					return errors.New("邀请码已经用过或者过期了")
+				}
+				return nil
+			})
+			got <- peer
+			<-s.Context().Done()
+		}()
+		peer, err := clientCards(c, b)
+		c.CloseWithError(0, "")
+		if reject {
+			if err == nil || !strings.Contains(err.Error(), "用过") {
+				t.Fatalf("应收到拒绝原因：%v", err)
+			}
+			continue
+		}
+		if err != nil || peer.Name != "A" || (<-got).Name != "B" {
+			t.Fatalf("互换名片：%v %+v", err, peer)
+		}
 	}
 }
