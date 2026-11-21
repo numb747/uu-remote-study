@@ -15,6 +15,8 @@ flowchart LR
   identity["设备身份：X25519 私钥 + 设备名<br/>identity.json"]
   store["通讯录：好友 + 待用邀请<br/>contacts.json"]
   rdv["会合 + 中继 99-server"]
+  diag["诊断：原因码 + 一句人话、每次连接的过程记录、诊断报告、日志落盘、崩溃现场<br/>reason.go / trace.go / p2pcp report"]:::planned
+  collector["上报收集：会合端口收 /H 写 jsonl，report-stats.py 按 NAT 组合 / 原因码汇总"]:::planned
   release["发布：GitHub Releases（APK 固定签名、Windows / macOS zip、Linux tar），启动时查新版本"]:::planned
 
   me -->|"点按钮、选文件"| android
@@ -33,6 +35,9 @@ flowchart LR
   serve -->|"读好友列表"| store
   xfer -->|"/R2、中继 /L"| rdv
   release -.->|"下载安装"| me
+  xfer -->|"每次连接结束"| diag
+  diag -.->|"/H 上报（默认开、可关）"| collector
+  android -->|"显示原因、生成诊断报告"| diag
 
 %% @src xfer lab/p2pcp/transfer.go func sendSession(
 %% @src android apps/android/src/dev/uulab/p2p/P2PService.java public class P2PService extends Service

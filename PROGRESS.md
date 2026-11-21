@@ -123,7 +123,7 @@
 - 还没推送；99-server 上 iroh-relay / certbot 的清理还没定（见 0.5.11）。
 
 ### 0.5.13 P2P 直传给朋友用：第 1~2 步完成（2026-11-21，交接）
-- **设计和进度都在 [docs/arch/DESIGN.md](docs/arch/DESIGN.md)**（21 条决策、7 步实现顺序），图 27-flow-pairing / 34-contacts。用户定：安卓 / Windows / macOS / Linux，不做 iPhone。新会话从「实现顺序」第一个没勾的（第 3 步桌面版本地网页 `p2pcp app`）接着做，第 3 步附了实施提示，已定的事不再讨论。
+- **设计和进度都在 [docs/arch/DESIGN.md](docs/arch/DESIGN.md)**（27 条决策、8 步实现顺序），图 27-flow-pairing / 34-contacts。用户定：安卓 / Windows / macOS / Linux，不做 iPhone。新会话从「实现顺序」第一个没勾的（第 3 步「诊断和反馈」：原因码、连接过程记录、诊断报告、自动上报，用户定的默认开可关）接着做，之后第 4 步桌面版本地网页附了实施提示，已定的事不再讨论。
 - 已完成：p2pcp 通讯录模式（`id / invite / join / contacts / send -to / serve`，设备密钥 X25519，好友之间的房间由 ECDH 派生、按方向分收件房间）；安卓 App 和电脑端 `p2p-direct` 都换成通讯录模式，旧的 `room` 退役。**我的电脑（cachyos-x8664）和手机（V2238A）已经重新配对**，两个方向、熄屏接收都实测过。
 - 手机上为了熄屏接收，已在系统设置里给 P2P 直传打开「允许后台高耗电」，并用 adb 把它加进了 deviceidle 白名单（vivo 熄屏会冻结 App，见 DESIGN 决策 19）。
 - 提交已全部推送（到 6b9c1a9）。
