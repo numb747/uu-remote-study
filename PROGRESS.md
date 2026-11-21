@@ -122,6 +122,13 @@
 - 第 8 步：电脑服务和手机 App 重装成最新版；架构地图同步到 d578d66（总览 preflight 转正，模块图加体检模块，netns 图加受限锥，见 docs/arch/CHANGES.md）。
 - 还没推送；99-server 上 iroh-relay / certbot 的清理还没定（见 0.5.11）。
 
+### 0.5.13 P2P 直传给朋友用：第 1~2 步完成（2026-11-21，交接）
+- **设计和进度都在 [docs/arch/DESIGN.md](docs/arch/DESIGN.md)**（21 条决策、7 步实现顺序），图 27-flow-pairing / 34-contacts。用户定：安卓 / Windows / macOS / Linux，不做 iPhone。新会话从「实现顺序」第一个没勾的（第 3 步桌面版本地网页 `p2pcp app`）接着做，第 3 步附了实施提示，已定的事不再讨论。
+- 已完成：p2pcp 通讯录模式（`id / invite / join / contacts / send -to / serve`，设备密钥 X25519，好友之间的房间由 ECDH 派生、按方向分收件房间）；安卓 App 和电脑端 `p2p-direct` 都换成通讯录模式，旧的 `room` 退役。**我的电脑（cachyos-x8664）和手机（V2238A）已经重新配对**，两个方向、熄屏接收都实测过。
+- 手机上为了熄屏接收，已在系统设置里给 P2P 直传打开「允许后台高耗电」，并用 adb 把它加进了 deviceidle 白名单（vivo 熄屏会冻结 App，见 DESIGN 决策 19）。
+- 提交都在本地 `main`，**这次会话后半段的提交还没推送**（推送到 5365f83 为止）。
+- 干活的小坑：手机有锁屏密码，装 App、看 App 界面要先让用户解锁；`/tmp/pairsmoke/tap.sh <文字>` 用 uiautomator 按文字点按钮；App 的配置在私有目录，adb 读不到，App 侧的问题只能看界面日志或改代码多打日志。
+
 ### 0.6 换到有 IPv6 的新电脑后，第一步
 ```bash
 ip -6 addr show scope global          # 有 2xxx: 开头的地址 = 有全球单播 IPv6

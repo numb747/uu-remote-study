@@ -57,6 +57,15 @@ iPhone、一对多 / 群发、账号和中心化的好友目录、网页版（�
   - 节点：34 的 `android`；验证：真实网络手机 ↔ 电脑加好友、互发；App 里能看到好友列表和邀请二维码。
 - [ ] **3. 桌面版 `p2pcp app`：本地网页界面 + 通知 + 开机自启**，先在 Linux 上做通。
   - 节点：34 的 `webui`、`osint`（Linux 部分）。验证：浏览器里加好友、发文件、看到收发记录；重启后自动起来。
+  - 实施提示（2026-11-21 交接时读代码记下的，开工前先核对）：
+    - 进程结构：`p2pcp app` = 一个 goroutine 跑 `serve(o)`（`pair.go`，阻塞循环，每 2 秒看通讯录）+ 一个只听 `127.0.0.1` 的 HTTP 服务（HTML/JS 用 `embed` 内嵌）。发送在同一进程里：`resolveFriend` + `send(o, paths)` 放 goroutine；邀请 `cmdInvite` 的逻辑拆成返回邀请码的函数，二维码直接 `qr.Encode(code).PNG()` 回给浏览器；加好友拆出 `cmdJoin` 的核心。
+    - **本地网页的安全**：别的网站能让浏览器往 `127.0.0.1` 发请求（CSRF），还有 DNS rebinding。至少：随机端口 + 随机令牌（启动时生成，浏览器用 `http://127.0.0.1:端口/?t=令牌` 打开，换成 HttpOnly cookie），每个请求核对令牌和 `Host` 头必须是 `127.0.0.1:端口`，改东西的接口只收 POST 并核对 `Origin`。
+    - 进度推给网页：`reporter`（`report.go`）现在只往 stdout 打 `@` 行；加一个 `sink func(string)` 钩子，app 模式下把同样的行经 SSE（`text/event-stream`）推给网页，网页照安卓 App 的 `Panel.handle` 那样解析 `@STATE/@PROGRESS/@DONE/@ERROR/@PAIRED`。`serve` 里每个好友的房间共用同一个 reporter，进度行里带的路径能看出是哪个好友（`<保存目录>/<好友名>/文件`）。
+    - 单实例：配置目录里写 `app.json`（端口 + 令牌 + pid）。再运行 `p2pcp app` 时发现已有实例就只打开浏览器到它；开机自启时用 `-no-browser`。
+    - 网页选文件：`<input type=file multiple>` 上传到临时目录再发（和安卓先复制到缓存一样），大文件主要靠右键发送（Linux 继续用 `p2p-direct send`，Windows「发送到」在第 4 步）。拖拽上传顺手做。
+    - 收发记录：先只在内存里留最近几十条，网页刷新时拉一次；要不要落盘等用起来再说。
+    - Linux 集成：`install.sh` 的 systemd 单元改成跑 `p2pcp app -no-browser -o ~/Downloads/P2P直传 -bind auto -notify`（代替 `p2p-direct serve`），启动器加一个「P2P 直传」打开网页（`p2pcp app` 发现已有实例就开浏览器）。现有 `p2p-direct send / invite / join` 照旧能用（它们是独立进程，和 app 共用 `~/.config/p2pcp`）。
+    - 为第 4、5 步留意：Windows 现在只卡在 `main.go` 的 `syscall.Kill`（`exitGracefully`），拆到 `_unix.go` / `_windows.go` 就行；macOS 已能编过。`defaultRoute` / `defaultRouteIP` 读 `/proc/net/route`，在 Windows / macOS 上返回空，`-bind auto` 就退化成不绑定（没有 TUN 代理时没问题）。
 - [ ] **4. Windows 版**：交叉编译、「发送到」、启动文件夹、toast 通知、防火墙首次放行提示。验证：wine 冒烟 + 实机测（待定）。
 - [ ] **5. macOS 版**：LaunchAgent、`osascript` 通知、zip 包和打开说明。验证：交叉编译 + 实机测（待定）。
 - [ ] **6. 发布**：固定签名、一条命令打出四个平台的包、GitHub Releases、启动时查新版本、给朋友的中文上手说明。
