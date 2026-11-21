@@ -67,6 +67,9 @@ func connect(o opts, rid, role string) (*session, error) {
 	const attempts = 6
 	if o.stun != "off" && o.stun != "" {
 		o.pre = startPreflight(o, role) // 后台测，不等；传输会话结束时 settle（preflight.go）
+		if o.relay == "always" {
+			o.pre.setForced()
+		}
 	}
 	servers := strings.Split(o.server, ",")
 	first := int(goodServer.Load())
@@ -147,6 +150,7 @@ var (
 	// errNoRendezvous：几轮下来一次都没拿到对方地址，问题在本机到会合服务器这一段，还没轮到打洞
 	errNoRendezvous = errors.New("连不上会合服务器")
 	errRelay        = errors.New("中继没有回应")
+	errStopped      = errors.New("不等了")
 )
 
 // connectOnce 用一个新 socket 注册、拿对方候选、打洞（或者走中继）。对方的候选 = 服务器看到的公网映射 + 对方自报的
@@ -204,6 +208,9 @@ func connectOnce(o opts, server, rid, id string, wantRelay bool) (*session, erro
 		var fl []string
 		if wantRelay {
 			fl = append(fl, "relay")
+			if o.relay == "always" {
+				fl = append(fl, "forced") // 强制走中继（测试用）：对方据此不拿预测去比（旧版不认识，忽略）
+			}
 		}
 		if f := o.pre.flag(); f != "" {
 			fl = append(fl, f)
@@ -262,6 +269,13 @@ func connectOnce(o opts, server, rid, id string, wantRelay bool) (*session, erro
 			unreg()
 			closeAll()
 			return nil, fmt.Errorf("%w：%v 没收到回执", errLost, time.Since(lastYou).Round(time.Second))
+		}
+		select {
+		case <-o.quit: // 接收端挂在升级房间里等，会话结束时叫停（upgrade.go）
+			unreg()
+			closeAll()
+			return nil, errStopped
+		default:
 		}
 		if o.timeout > 0 && time.Since(start) > o.timeout {
 			unreg()

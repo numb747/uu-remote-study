@@ -26,6 +26,9 @@ type outcome struct {
 	punch     time.Duration // 成功那一轮的打洞（或进中继）用时
 	handshake time.Duration // QUIC 握手 + 认证
 	rounds    int
+	// 走中继期间升级到了直连（upgrade.go）：走了多久中继、升级后的对方地址
+	upgraded    time.Duration
+	upgradedVia string
 }
 
 func (l *link) outcome() outcome {
@@ -68,13 +71,17 @@ type histRec struct {
 	Predict     string      `json:"predict"`
 	Why         string      `json:"why"`
 	Actual      string      `json:"actual"`
-	Wrong       bool        `json:"wrong,omitempty"` // 预测「能直连」却走了中继 / 失败，或预测「打不通」却直连了
+	Wrong       bool        `json:"wrong,omitempty"`  // 预测「能直连」却走了中继 / 失败，或预测「打不通」却直连了
+	Forced      bool        `json:"forced,omitempty"` // 有一端 -relay always：走中继是强制的，不算预测错
 	Via         string      `json:"via,omitempty"`
 	Err         string      `json:"err,omitempty"`
 	Rounds      int         `json:"rounds,omitempty"`
 	TookMs      int64       `json:"took_ms"`
 	PunchMs     int64       `json:"punch_ms,omitempty"`
 	HandshakeMs int64       `json:"handshake_ms,omitempty"`
+	// actual 仍记中继（开局时的实际结果），升级不算预测错
+	UpgradedAfterMs int64  `json:"upgraded_after_ms,omitempty"`
+	UpgradedVia     string `json:"upgraded_via,omitempty"`
 }
 
 // wrongPrediction 预测和实际对不上（「不确定」「无法预测」不算错）
@@ -103,11 +110,16 @@ func resultLine(r histRec) string {
 		}
 		s += fmt.Sprintf("，%s %v（第 %d 轮），QUIC 握手 + 认证 %v，从开始会合共 %v",
 			what, ms(r.PunchMs), r.Rounds, ms(r.HandshakeMs), ms(r.TookMs+r.HandshakeMs))
+		if r.UpgradedVia != "" {
+			s += fmt.Sprintf("，走中继 %v 后升级到直连 %s", ms(r.UpgradedAfterMs).Round(100*time.Millisecond), r.UpgradedVia)
+		}
 	} else if r.Err != "" {
 		s += "（" + r.Err + "）"
 	}
 	switch {
 	case r.Predict == "":
+	case r.Forced:
+		s += fmt.Sprintf("；预测%s（强制走中继，不比对）", r.Predict)
 	case r.Wrong:
 		s += fmt.Sprintf("；预测%s，预测错了", r.Predict)
 	case r.Predict == predYes || r.Predict == predNo:

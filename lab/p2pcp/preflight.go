@@ -14,6 +14,8 @@ package main
 
 import (
 	"log"
+	"slices"
+	"strings"
 	"sync"
 	"time"
 )
@@ -31,6 +33,17 @@ type preflight struct {
 	actual   string        // 实际结果：直连 / 中继；空 = 还没连上
 	checked  bool          // 预测和实际已经对过
 	settled  bool          // 结果已经报过、记过
+	forced   bool          // 有一端用了 -relay always：走中继是强制的，不拿预测去比
+}
+
+// setForced：强制走中继（本端 -relay always，或对方的标志里有 forced）
+func (p *preflight) setForced() {
+	if p == nil {
+		return
+	}
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.forced = true
 }
 
 // snapshot 给 check -room 的报告用：本机画像、对方画像（没收到时 ok2 为 false）、预测
@@ -66,7 +79,7 @@ func (p *preflight) setActual(relayed bool) {
 
 // compare 预测和实际都有了就对一次（调用方持有锁）
 func (p *preflight) compare() {
-	if p.checked || p.actual == "" || !p.reported {
+	if p.checked || p.actual == "" || !p.reported || p.forced {
 		return
 	}
 	p.checked = true
@@ -125,6 +138,9 @@ func (p *preflight) sawPeer(flags string) {
 	if p == nil {
 		return
 	}
+	if slices.Contains(strings.Split(flags, ","), "forced") {
+		p.setForced()
+	}
 	pp := parseNat(flags)
 	if pp.Class == "" {
 		return
@@ -170,11 +186,13 @@ func (p *preflight) settle(out outcome) {
 		At: time.Now(), Role: p.role, Me: histOf(p.me), Predict: p.verdict.Result, Why: p.verdict.Why,
 		Actual: out.actual, Via: out.via, Err: out.err, Rounds: out.rounds,
 		TookMs: out.took.Milliseconds(), PunchMs: out.punch.Milliseconds(), HandshakeMs: out.handshake.Milliseconds(),
+		UpgradedAfterMs: out.upgraded.Milliseconds(), UpgradedVia: out.upgradedVia,
 	}
 	if p.havePeer {
 		rec.Peer = histOf(&p.peer)
 	}
-	rec.Wrong = wrongPrediction(rec.Predict, rec.Actual)
+	rec.Forced = p.forced
+	rec.Wrong = !p.forced && wrongPrediction(rec.Predict, rec.Actual)
 	log.Printf("体检  %s", resultLine(rec))
 	appendHistory(rec)
 	p.rep.check(rec)

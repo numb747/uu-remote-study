@@ -10,6 +10,8 @@
 #   reconn   传到一半路径断 20 秒，发送端自己重连续传
 #   tunnel   expose/forward 回显；中途三次把 forward 正在用的 UDP 端口封掉，每次都迁移到新洞上，TCP 会话不断
 #   upgrade  forward 先强制走中继，15 秒后自己打通直连并迁移过去，TCP 会话不断
+#   xferup   传文件先强制走中继（中继限速 3Mbit，像 99-server），15 秒后后台打通直连，在直连上重开会话续传完（接收端 recv）
+#   xferblock 同上，但前 20 秒直连被封：第一次升级失败，下一次（约 50 秒）才升级成功（接收端 daemon）
 #   preflight 体检：两端的画像（按 $NAT_A / $NAT_B 核对类别）和组合预测，再传一个小文件
 #   checkpair 两端同时 p2pcp check -room：报告里的预测、实测、往返、中继、结论要和 NAT 组合对得上
 #   desync   人为让两端的打洞轮次错开（B 晚 1.5 秒拿到 /P，前 4.5 秒 A→B 直连全丢）：B 应从重推的 /P 学到 A 的新地址，
@@ -21,7 +23,7 @@ B=$BIN_DIR
 W=$(mktemp -d /tmp/p2pcp-test.XXXX)
 SRV=192.0.2.1:7001,192.0.2.1:7000
 ROOM=lab-$RANDOM-$RANDOM
-TESTS=${TESTS:-preflight desync checkpair send resume reconn tunnel upgrade}
+TESTS=${TESTS:-preflight desync checkpair send resume reconn tunnel upgrade xferup xferblock}
 A() { ip netns exec peerA "$@"; }
 Bn() { ip netns exec peerB "$@"; }
 # 后台跑：$! 就是 p2pcp 进程本身（ip netns exec 会 exec 过去），kill 得到
@@ -314,6 +316,80 @@ t_upgrade() {
 		echo "  · 没迁到直连（对称 NAT 两端时打不通是对的）：$(grep -o '迁移失败.*' "$W/upgrade-forward.log" | tail -1 | cut -c1-90)"
 	fi
 	stop_tunnel
+}
+
+# 中继限速 3Mbit（99-server 出方向就是 3M）：中继进程在 inet 里，限它发出的包
+relay_slow() {
+	ip netns exec inet nft add table ip rlim
+	ip netns exec inet nft add chain ip rlim out '{ type filter hook output priority 0; }'
+	ip netns exec inet nft add rule ip rlim out udp sport 3478 limit rate over 375 kbytes/second burst 64 kbytes drop
+}
+relay_fast() { ip netns exec inet nft delete table ip rlim; }
+
+t_xferup() {
+	echo "== xferup：先走中继（限速 3Mbit），后台打通直连后在直连上续传（natA=$NAT_A natB=$NAT_B）"
+	local ca cb want size
+	ca=$(want_class "$NAT_A") cb=$(want_class "$NAT_B")
+	# 打不通的组合 10MB：3Mbit 约 27 秒，够第一次升级尝试（15 秒起、打洞 4 秒）失败
+	case "$ca/$cb" in sym/sym | sym/port | port/sym) want=打不通 size=10000000 ;; *) want=能直连 size=20000000 ;; esac
+	head -c $size /dev/urandom >"$W/up.bin"
+	mkdir -p "$W/upout"
+	relay_slow
+	bgB "$B/p2pcp" recv -server "$SRV" -room "$ROOM.up" -o "$W/upout" -timeout 30s >"$W/xferup-recv.log" 2>&1
+	local r=$! t0=$SECONDS
+	sleep 0.3
+	A "$B/p2pcp" send -server "$SRV" -room "$ROOM.up" -relay always "$W/up.bin" >"$W/xferup-send.log" 2>&1
+	wait $r
+	local rc=$? el=$((SECONDS - t0))
+	relay_fast
+	cmp -s "$W/up.bin" "$W/upout/up.bin" && ok "文件正确（${el} 秒，$((size / 1000000))MB），recv 退出码 $rc" || { bad "文件不对"; tail -n 8 "$W/xferup-send.log" "$W/xferup-recv.log"; }
+	grep -q '改走中继' "$W/xferup-send.log" && ok "先走了中继" || bad "没走中继"
+	if [[ $want == 能直连 ]]; then
+		grep -q '升级到直连' "$W/xferup-send.log" && ok "$(grep -o '升级到直连 [^，]*' "$W/xferup-send.log" | head -1)" || bad "没升级：$(grep -o '升级到直连没成.*' "$W/xferup-send.log" | tail -1)"
+		grep -q '对方已在直连' "$W/xferup-recv.log" && ok "接收端在直连上接着收" || bad "接收端没接上直连：$(tail -n 3 "$W/xferup-recv.log" | tr '\n' '|')"
+		grep -q '续传 up.bin：对方已有' "$W/xferup-send.log" && ok "$(grep -o '续传 up.bin：对方已有 [^M]*MB' "$W/xferup-send.log" | head -1)" || bad "直连上没有续传"
+		grep -q '\[1\] SRTT' "$W/xferup-send.log" && ok "直连上开了第 2 条连接" || bad "直连上没开第 2 条连接"
+		grep -q '走中继 [0-9.]*s 后升级到直连' "$W/xferup-send.log" && grep -q '"upgraded_via"' "$XDG_CACHE_HOME/p2pcp/history.jsonl" &&
+			ok "$(grep -o '体检  结果：.*' "$W/xferup-send.log" | sed 's/^体检  //' | tail -1)" || bad "结果行 / 记录里没有升级"
+		((el < 22)) && ok "共 ${el} 秒（全走中继约 55 秒）" || bad "太慢：${el} 秒"
+	else
+		! grep -q '升级到直连 ' "$W/xferup-send.log" && grep -q '升级到直连没成' "$W/xferup-send.log" &&
+			ok "打不通，留在中继上传完：$(grep -o '升级到直连没成.*' "$W/xferup-send.log" | head -1 | cut -c1-50)" ||
+			bad "打不通的组合：$(grep -o '升级到直连.*' "$W/xferup-send.log" | head -1)"
+	fi
+}
+
+t_xferblock() {
+	echo "== xferblock：前 20 秒直连被封，第一次升级失败，下一次才升级（natA=$NAT_A natB=$NAT_B）"
+	local ca cb
+	ca=$(want_class "$NAT_A") cb=$(want_class "$NAT_B")
+	case "$ca/$cb" in sym/sym | sym/port | port/sym) echo "  · 打不通的组合，跳过"; return ;; esac
+	head -c 40000000 /dev/urandom >"$W/blk.bin"
+	mkdir -p "$W/blkout"
+	relay_slow
+	# 两个 NAT 之间的直连全丢（中继、会合都在 192.0.2.x，不受影响），20 秒后放开
+	ip netns exec natA nft add table ip cut
+	ip netns exec natA nft add chain ip cut blk '{ type filter hook forward priority -10; }'
+	ip netns exec natA nft add rule ip cut blk ip daddr 198.51.100.2 meta l4proto udp drop
+	ip netns exec natA nft add rule ip cut blk ip saddr 198.51.100.2 meta l4proto udp drop
+	(sleep 20; ip netns exec natA nft delete table ip cut) &
+	bgB "$B/p2pcp" daemon -server "$SRV" -room "$ROOM.blk" -o "$W/blkout" >"$W/xferblock-recv.log" 2>&1
+	local r=$! t0=$SECONDS
+	sleep 0.3
+	A "$B/p2pcp" send -server "$SRV" -room "$ROOM.blk" -relay always "$W/blk.bin" >"$W/xferblock-send.log" 2>&1
+	local el=$((SECONDS - t0))
+	sleep 0.5
+	kill $r 2>/dev/null
+	relay_fast
+	cmp -s "$W/blk.bin" "$W/blkout/blk.bin" && ok "文件正确（${el} 秒）" || { bad "文件不对"; tail -n 8 "$W/xferblock-send.log" "$W/xferblock-recv.log"; }
+	local n
+	n=$(grep -c '升级到直连没成' "$W/xferblock-send.log")
+	((n >= 1)) && ok "封锁期间升级失败 $n 次：$(grep -o '升级到直连没成.*' "$W/xferblock-send.log" | head -1 | cut -c1-70)" || bad "封锁期间没有失败的尝试"
+	grep -q '升级到直连 ' "$W/xferblock-send.log" && ok "$(grep -o '升级到直连 [^，]*' "$W/xferblock-send.log" | head -1)" || bad "放开后没升级"
+	grep -q '对方已在直连' "$W/xferblock-recv.log" && ok "daemon 在直连上接着收" || bad "daemon 没接上直连"
+	local hist=$XDG_CACHE_HOME/p2pcp/history.jsonl
+	grep '"upgraded_via"' "$hist" | grep -q '"wrong":true' && bad "强制中继被记成预测错" ||
+		ok "强制中继不算预测错（$(grep -c '"forced":true' "$hist") 条 forced 记录）"
 }
 
 for t in $TESTS; do "t_$t"; done

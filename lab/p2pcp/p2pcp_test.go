@@ -552,3 +552,95 @@ func TestPingPong(t *testing.T) {
 		}
 	}
 }
+
+// 升级到直连的切换时机（upgrade.go）：end → ok 之间等着、最后一个文件收尾后和会话结束后都不切
+func TestUpgraderSwitch(t *testing.T) {
+	mk := func() *link { return &link{session: &session{peer: udpAddr("5.6.7.8:9")}} }
+
+	// nil（直连会话）上什么都能调
+	var none *upgrader
+	none.enter()
+	none.leave(true)
+	none.annotate(&outcome{})
+	if none.stop() != nil {
+		t.Fatal("nil upgrader 不该交出直连")
+	}
+
+	// 平时：切过去，中继关掉，stop 交出直连，记录里补上升级
+	u := &upgrader{start: time.Now()}
+	relay, nl := mk(), mk()
+	if !u.switchTo(nl, relay) || !relay.isClosed() || nl.isClosed() {
+		t.Fatal("应切过去：关中继、留直连")
+	}
+	var out outcome
+	u.annotate(&out)
+	if out.upgradedVia != "5.6.7.8:9" {
+		t.Fatalf("记录没补上升级：%+v", out)
+	}
+	if u.stop() != nl {
+		t.Fatal("stop 应交出直连")
+	}
+
+	// end → ok 之间：等 leave 之后才切
+	u = &upgrader{start: time.Now()}
+	relay, nl = mk(), mk()
+	u.enter()
+	done := make(chan bool)
+	go func() { done <- u.switchTo(nl, relay) }()
+	select {
+	case <-done:
+		t.Fatal("end → ok 之间不该切")
+	case <-time.After(50 * time.Millisecond):
+	}
+	if relay.isClosed() {
+		t.Fatal("end → ok 之间关了中继")
+	}
+	u.leave(false)
+	if !<-done || !relay.isClosed() {
+		t.Fatal("leave 之后应切过去")
+	}
+
+	// 最后一个文件发出 end 之后、会话结束之后：不切，直连扔掉
+	for name, prep := range map[string]func(*upgrader){
+		"最后一个文件": func(u *upgrader) { u.enter(); u.leave(true) },
+		"会话结束":   func(u *upgrader) { u.stop() },
+	} {
+		u = &upgrader{start: time.Now()}
+		relay, nl = mk(), mk()
+		prep(u)
+		if u.switchTo(nl, relay) || relay.isClosed() || !nl.isClosed() || !u.stopped() {
+			t.Fatalf("%s：不该切，直连应关掉", name)
+		}
+	}
+}
+
+func TestResultLineUpgraded(t *testing.T) {
+	r := histRec{Actual: "中继", Via: "192.0.2.1:3478", Rounds: 1, PunchMs: 30, HandshakeMs: 5, TookMs: 40,
+		UpgradedAfterMs: 15234, UpgradedVia: "198.51.100.2:4000", Predict: predYes}
+	r.Wrong = wrongPrediction(r.Predict, r.Actual)
+	got := resultLine(r)
+	if !strings.Contains(got, "走中继 15.2s 后升级到直连 198.51.100.2:4000") {
+		t.Errorf("结果行：%s", got)
+	}
+}
+
+// 对方 -relay always（标志里有 forced）：走中继不算预测错
+func TestForcedRelayNotWrong(t *testing.T) {
+	t.Setenv("XDG_CACHE_HOME", t.TempDir())
+	p := &preflight{role: "recv", ready: make(chan struct{})}
+	p.setMe(profile{Class: natCone})
+	p.sawPeer("relay,forced,nat=port")
+	p.setActual(true)
+	p.settle(outcome{actual: "中继", rounds: 1})
+	b, err := os.ReadFile(historyPath())
+	if err != nil {
+		t.Fatal(err)
+	}
+	var rec histRec
+	if err := json.Unmarshal(b, &rec); err != nil {
+		t.Fatal(err)
+	}
+	if rec.Predict != predYes || !rec.Forced || rec.Wrong || !strings.Contains(resultLine(rec), "强制走中继，不比对") {
+		t.Fatalf("强制中继不该算预测错：%+v / %s", rec, resultLine(rec))
+	}
+}

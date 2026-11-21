@@ -84,15 +84,16 @@ type opts struct {
 	cc       string
 	relay    string // auto | off | always
 	out      string
-	to       string        // expose：转发目标
-	listen   string        // forward：本地监听地址
-	timeout  time.Duration // 等对方的超时，0 = 一直等（daemon）
-	regEvery time.Duration // 注册间隔
-	stun     string        // 体检用的公开 STUN，逗号分隔；off = 不体检
-	pre      *preflight    // 这次 connect 的体检（connect 里填）
-	fresh    bool          // 画像不用缓存、现测（check -room）
-	preWait  time.Duration // 第一次注册前最多等本机画像多久（0 = 50ms；check -room 要等它测完）
-	roomSet  bool          // 命令行给了 -room（check 带 -room 时做双端体检）
+	to       string          // expose：转发目标
+	listen   string          // forward：本地监听地址
+	timeout  time.Duration   // 等对方的超时，0 = 一直等（daemon）
+	regEvery time.Duration   // 注册间隔
+	stun     string          // 体检用的公开 STUN，逗号分隔；off = 不体检
+	pre      *preflight      // 这次 connect 的体检（connect 里填）
+	fresh    bool            // 画像不用缓存、现测（check -room）
+	preWait  time.Duration   // 第一次注册前最多等本机画像多久（0 = 50ms；check -room 要等它测完）
+	roomSet  bool            // 命令行给了 -room（check 带 -room 时做双端体检）
+	quit     <-chan struct{} // 关闭时 connectOnce 不再等对方（升级房间里的接收端，upgrade.go）
 	rep      *reporter
 }
 

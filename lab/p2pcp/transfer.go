@@ -12,6 +12,7 @@ package main
 //	……下一个文件…… 最后发送端 → {"t":"bye"}
 //
 // 打通之后传输中途断了（换网、对方 App 被杀、对方重启），发送端自己重连，已经收到的部分不重传。
+// 走中继时后台继续打洞，打通了就关掉中继会话、在直连上重开一个会话接着传（upgrade.go）。
 // 块由各条连接抢着发：快的连接多发，慢的少发，不会像按连接数均分那样被最慢的一条拖住。
 
 import (
@@ -104,10 +105,16 @@ func send(o opts, paths []string) error {
 	}
 	files := append([]string(nil), paths...)
 	backoff, fails := 2*time.Second, 0
+	var next *link // 中继会话期间打通的直连：下一个会话直接用它
 	for {
-		progressed, err := sendSession(o, &files)
+		progressed, up, err := sendSession(o, &files, next)
+		next = nil
 		if err == nil {
 			return nil
+		}
+		if up != nil {
+			next, backoff, fails = up, 2*time.Second, 0
+			continue
 		}
 		if progressed {
 			backoff, fails = 2*time.Second, 0
@@ -122,8 +129,9 @@ func send(o opts, paths []string) error {
 	}
 }
 
-// sendSession 打一次洞，把 files 依次发完；发完一个就从 files 里去掉，重连时从没发完的接着来
-func sendSession(o opts, files *[]string) (progressed bool, err error) {
+// sendSession 打一次洞（l 非空时直接用它），把 files 依次发完；发完一个就从 files 里去掉，重连时从没发完的接着来。
+// 走中继时后台在打洞，打通了就关掉中继、返回那条直连（up），send 在它上面重开会话
+func sendSession(o opts, files *[]string, l *link) (progressed bool, up *link, err error) {
 	var total int64
 	for _, p := range *files {
 		if fi, err := os.Stat(p); err == nil {
@@ -134,17 +142,30 @@ func sendSession(o opts, files *[]string) (progressed bool, err error) {
 	if total < 1<<20 {
 		n = 1 // 小文件多开连接没用
 	}
-	if len(*files) == 1 {
-		o.rep.state(fmt.Sprintf("连接对方：%s（%.1fMB）", filepath.Base((*files)[0]), float64(total)/1e6))
-	} else {
-		o.rep.state(fmt.Sprintf("连接对方：%d 个文件（%.1fMB）", len(*files), float64(total)/1e6))
-	}
-	l, err := dialPeer(o, alpn)
-	if err != nil {
-		return false, err
+	if l == nil {
+		if len(*files) == 1 {
+			o.rep.state(fmt.Sprintf("连接对方：%s（%.1fMB）", filepath.Base((*files)[0]), float64(total)/1e6))
+		} else {
+			o.rep.state(fmt.Sprintf("连接对方：%d 个文件（%.1fMB）", len(*files), float64(total)/1e6))
+		}
+		if l, err = dialPeer(o, alpn); err != nil {
+			return false, nil, err
+		}
 	}
 	defer l.close()
-	defer func() { l.pre.settle(l.outcome()) }() // defer 后进先出，在 close 之前跑：体检的结论在传输结束时补齐（preflight.go）
+	u := startUpgrade(o, l)
+	defer func() {
+		// defer 后进先出，在 close 之前跑：体检的结论在传输结束时补齐（preflight.go）
+		out := l.outcome()
+		u.annotate(&out)
+		l.pre.settle(out)
+	}()
+	defer func() {
+		if up = u.stop(); up != nil && err == nil {
+			up.close() // 切过去时其实已经传完了（走不到这里：最后一个文件发出 end 后就不切了）
+			up = nil
+		}
+	}()
 	logLinked(l)
 	o.rep.state("已连上 " + l.via())
 	if l.relayed {
@@ -161,21 +182,21 @@ func sendSession(o opts, files *[]string) (progressed bool, err error) {
 	}
 	for _, c := range conns {
 		if err := applyCC(c, o.cc); err != nil {
-			return false, err
+			return false, nil, err
 		}
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	ctl, err := l.conn.OpenStreamSync(ctx)
 	cancel()
 	if err != nil {
-		return false, interrupted{err}
+		return false, nil, interrupted{err}
 	}
 	enc, dec := json.NewEncoder(ctl), json.NewDecoder(ctl)
 	for len(*files) > 0 {
-		moved, err := sendFile(o, (*files)[0], conns, enc, dec)
+		moved, err := sendFile(o, (*files)[0], conns, enc, dec, u, len(*files) == 1)
 		progressed = progressed || moved
 		if err != nil {
-			return progressed, err
+			return progressed, nil, err
 		}
 		*files = (*files)[1:]
 		progressed = true
@@ -186,10 +207,11 @@ func sendSession(o opts, files *[]string) (progressed bool, err error) {
 	case <-l.conn.Context().Done():
 	case <-time.After(2 * time.Second):
 	}
-	return progressed, nil
+	return progressed, nil, nil
 }
 
-func sendFile(o opts, path string, conns []*quic.Conn, enc *json.Encoder, dec *json.Decoder) (moved bool, err error) {
+// sendFile 发一个文件。u 非空时（走中继）end → ok 之间拿着它的锁，这期间不切到直连；last = 这是最后一个文件
+func sendFile(o opts, path string, conns []*quic.Conn, enc *json.Encoder, dec *json.Decoder, u *upgrader, last bool) (moved bool, err error) {
 	f, err := os.Open(path)
 	if err != nil {
 		return false, err
@@ -281,11 +303,16 @@ func sendFile(o opts, path string, conns []*quic.Conn, enc *json.Encoder, dec *j
 	if first != nil {
 		return sent > 0, interrupted{first}
 	}
-	if err := enc.Encode(ctlMsg{T: "end", SHA256: <-sum}); err != nil {
+	digest := <-sum
+	u.enter()
+	if err := enc.Encode(ctlMsg{T: "end", SHA256: digest}); err != nil {
+		u.leave(false)
 		return true, interrupted{err}
 	}
 	var res ctlMsg
-	if err := dec.Decode(&res); err != nil {
+	err = dec.Decode(&res)
+	u.leave(last)
+	if err != nil {
 		return true, interrupted{fmt.Errorf("等对方确认: %w", err)}
 	}
 	if res.T != "ok" {
@@ -488,11 +515,47 @@ func lockFID(fid string) (unlock func()) {
 	}
 }
 
-// recvSession 处理一个发送端：除了第一条连接，对方还会在同一个洞上开别的连接，都在后台接着；
-// 每条连接上的单向流是数据块，写进当前文件
+// recvSession 处理一个发送端。走中继时对方可能在后台打通直连、关掉中继会话，在直连上重开会话（upgrade.go）：
+// 那就在新的链接上接着收，同一个文件照常续传
 func recvSession(o opts, l *link) error {
-	defer func() { l.pre.settle(l.outcome()) }() // 体检的结论在传输结束时补齐（preflight.go）
+	for {
+		next, err := recvOne(o, l)
+		if next == nil {
+			return err
+		}
+		l = next
+	}
+}
+
+// recvOne 在一个链接上收：除了第一条连接，对方还会在同一个洞上开别的连接，都在后台接着；
+// 每条连接上的单向流是数据块，写进当前文件。走中继时同时挂在升级房间里等（waitUpgrade），
+// 中继会话断开时对方已经在直连上连过来了，就返回那条直连
+func recvOne(o opts, l *link) (next *link, err error) {
+	stop := make(chan struct{})
+	up := waitUpgrade(o, l, stop)
+	t0 := time.Now()
+	defer func() { // 体检的结论在传输结束时补齐（preflight.go）
+		out := l.outcome()
+		if next != nil {
+			out.upgraded, out.upgradedVia = time.Since(t0), next.peer.String()
+		}
+		l.pre.settle(out)
+	}()
 	defer l.close()
+	defer close(stop)
+	if err = serveLink(o, l); err != nil && l.relayed {
+		// 发送端是先接上直连、再关中继的，所以这边中继一断，直连多半已经在等着了；留几秒给最后的认证
+		select {
+		case next = <-up:
+			log.Printf("中继会话断开（%v）：对方已在直连 %s 上重开会话，接着收", err, next.via())
+			return next, nil
+		case <-time.After(3 * time.Second):
+		}
+	}
+	return nil, err
+}
+
+func serveLink(o opts, l *link) error {
 	logLinked(l)
 	o.rep.state("已连上 " + l.via())
 	var cur atomic.Pointer[inFile]
