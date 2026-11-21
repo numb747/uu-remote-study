@@ -19,6 +19,7 @@ import (
 type reporter struct {
 	machine bool
 	notify  bool
+	sink    func(string) // 桌面版（app.go）：同样的机器行推给网页
 
 	mu      sync.Mutex
 	nid     string // 当前通知的 ID，用来原地更新
@@ -28,6 +29,9 @@ type reporter struct {
 func (r *reporter) line(format string, a ...any) {
 	if r.machine {
 		fmt.Printf(format+"\n", a...)
+	}
+	if r.sink != nil {
+		r.sink(fmt.Sprintf(format, a...))
 	}
 }
 

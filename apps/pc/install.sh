@@ -3,8 +3,8 @@
 #   ~/.local/bin/p2pcp、~/.local/bin/p2p-direct
 #   ~/.config/p2pcp/identity.json     设备密钥（p2pcp 第一次运行时自己生成），contacts.json 好友列表
 #   ~/.config/p2pcp/server            会合服务器地址（第一次安装时由 P2P_SERVER 给出；手机 App 构建时也读它）
-#   systemd 用户服务 p2p-direct       常驻接收
-#   启动器「P2P 直传：发给好友」、Dolphin 右键「P2P 直传给好友」、图标 p2p-direct
+#   systemd 用户服务 p2p-direct       桌面版 p2pcp app -no-browser：常驻接收 + 本机网页界面
+#   启动器「P2P 直传」（打开网页界面）、「P2P 直传：发给好友」、Dolphin 右键「P2P 直传给好友」、图标 p2p-direct
 #
 #   P2P_SERVER=1.2.3.4:7001 ./install.sh   第一次安装（服务器端跑 punch server -listen :7001 -relay :3478）
 #   ./install.sh                           更新
@@ -18,7 +18,7 @@ UNIT=~/.config/systemd/user/p2p-direct.service
 
 if [ "${1:-}" = uninstall ]; then
 	systemctl --user disable --now p2p-direct.service 2>/dev/null || true
-	rm -f ~/.local/bin/p2pcp ~/.local/bin/p2p-direct "$UNIT" "$APPS/p2p-direct-send.desktop" "$MENUS/p2p-direct.desktop" "$ICON"
+	rm -f ~/.local/bin/p2pcp ~/.local/bin/p2p-direct "$UNIT" "$APPS/p2p-direct.desktop" "$APPS/p2p-direct-send.desktop" "$MENUS/p2p-direct.desktop" "$ICON"
 	systemctl --user daemon-reload
 	echo "已卸载"
 	exit 0
@@ -39,16 +39,29 @@ gtk-update-icon-cache -q ~/.local/share/icons/hicolor 2>/dev/null || true
 
 cat > "$UNIT" <<EOF
 [Unit]
-Description=P2P 直传：常驻接收好友发来的文件
+Description=P2P 直传：常驻接收好友发来的文件 + 本机网页界面
 After=graphical-session.target
 
 [Service]
-ExecStart=%h/.local/bin/p2p-direct serve
+ExecStart=%h/.local/bin/p2p-direct app -no-browser
 Restart=always
 RestartSec=3
 
 [Install]
 WantedBy=default.target
+EOF
+
+# 打开网页界面：服务在跑时 p2pcp app 只打开浏览器（单实例，lab/p2pcp/app.go）
+cat > "$APPS/p2p-direct.desktop" <<EOF
+[Desktop Entry]
+Type=Application
+Name=P2P 直传
+Comment=打洞直连传文件：好友、加好友、发送、收发记录
+Icon=p2p-direct
+Exec=$HOME/.local/bin/p2p-direct app
+Terminal=false
+Categories=Network;FileTransfer;
+Keywords=p2p;phone;send;手机;传;好友;
 EOF
 
 cat > "$APPS/p2p-direct-send.desktop" <<EOF

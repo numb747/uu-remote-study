@@ -1,0 +1,313 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>P2P 直传</title>
+<style>
+  :root { --bg:#1a1b26; --card:#24283b; --fg:#c0caf5; --dim:#565f89; --blue:#7aa2f7; --green:#9ece6a; --red:#f7768e; --line:#3b4261; }
+  * { box-sizing: border-box; }
+  body { margin:0; background:var(--bg); color:var(--fg); font:15px/1.55 system-ui, "Noto Sans CJK SC", "Microsoft YaHei", "PingFang SC", sans-serif; }
+  main { max-width: 760px; margin: 0 auto; padding: 28px 20px 60px; }
+  h1 { color:var(--blue); margin:0; font-size:28px; }
+  .dim { color:var(--dim); font-size:13px; }
+  .link { color:var(--blue); cursor:pointer; }
+  .row { display:flex; gap:12px; margin-top:16px; }
+  button { font:inherit; border:0; border-radius:12px; padding:12px 18px; cursor:pointer; color:var(--bg); font-weight:600; }
+  button.big { flex:1; font-size:16px; padding:14px; }
+  button.small { padding:6px 12px; font-size:13px; border-radius:8px; background:var(--line); color:var(--fg); font-weight:normal; }
+  .blue { background:var(--blue); } .green { background:var(--green); }
+  .card { background:var(--card); border-radius:14px; padding:14px 18px; margin-top:14px; }
+  .card h2 { font-size:13px; color:var(--dim); margin:0 0 6px; font-weight:600; }
+  .friend { display:flex; align-items:center; gap:10px; padding:10px 8px; border-radius:10px; }
+  .friend + .friend { border-top:1px solid var(--line); }
+  .friend .name { flex:1; font-size:17px; }
+  .friend.drop { background:#2f3549; outline:2px dashed var(--blue); }
+  .state { font-size:16px; margin:6px 0 8px; }
+  .state.ok { color:var(--green); } .state.bad { color:var(--red); }
+  .bar { height:8px; background:var(--line); border-radius:4px; overflow:hidden; }
+  .bar > div { height:100%; width:0; background:var(--blue); transition: width .3s; }
+  .detail { color:var(--dim); font-size:13px; margin-top:6px; white-space:pre-wrap; }
+  #log { font:12px/1.5 ui-monospace, monospace; color:var(--dim); white-space:pre-wrap; max-height:220px; overflow:auto; }
+  .rec { font-size:14px; padding:4px 0; }
+  .rec .t { color:var(--dim); font-size:12px; margin-right:8px; }
+  .modal { position:fixed; inset:0; background:#000a; display:none; align-items:center; justify-content:center; }
+  .modal.on { display:flex; }
+  .modal .box { background:var(--card); border-radius:16px; padding:22px; width:min(440px, 92vw); }
+  .modal img { width:100%; image-rendering:pixelated; border-radius:8px; background:#fff; }
+  textarea, input[type=text] { width:100%; font:inherit; background:var(--bg); color:var(--fg); border:1px solid var(--line); border-radius:8px; padding:10px; }
+  .code { word-break:break-all; font:13px ui-monospace, monospace; background:var(--bg); padding:8px; border-radius:8px; margin:10px 0; user-select:all; }
+  #toast { position:fixed; left:50%; bottom:28px; transform:translateX(-50%); background:var(--line); padding:10px 18px; border-radius:10px; display:none; }
+</style>
+</head>
+<body>
+<main>
+  <h1>P2P 直传</h1>
+  <div class="dim">本机：<span id="me" class="link" title="点这里改名">…</span>　<span id="ver"></span></div>
+  <div class="row">
+    <button class="big blue" id="inviteBtn">邀请好友</button>
+    <button class="big green" id="joinBtn">加好友</button>
+  </div>
+
+  <div class="card">
+    <h2>好友（点「发送文件」选文件，或者把文件拖到好友上）</h2>
+    <div id="friends"></div>
+  </div>
+
+  <div class="card" id="sendCard">
+    <h2>发送</h2>
+    <div class="state" id="sendState">选一个好友发文件</div>
+    <div class="bar"><div id="sendBar"></div></div>
+    <div class="detail" id="sendDetail"></div>
+  </div>
+
+  <div class="card" id="recvCard">
+    <h2>接收（后台常驻，存到 <span id="out"></span>/好友名）</h2>
+    <div class="state" id="recvState">—</div>
+    <div class="bar"><div id="recvBar"></div></div>
+    <div class="detail" id="recvDetail"></div>
+  </div>
+
+  <div class="card">
+    <h2>收发记录</h2>
+    <div id="records"><div class="dim">还没有</div></div>
+  </div>
+
+  <div class="card">
+    <h2>诊断</h2>
+    <div class="link" id="reportBtn">生成诊断报告（打不通、收不到时用：现测一次网络，加上最近的连接记录和日志，好友名、文件名换成代号，可以直接发微信）</div>
+    <div id="reportOut" class="detail"></div>
+    <div style="margin-top:10px">诊断数据上报：<span id="upload" class="link">…</span></div>
+    <div class="dim">每次连接结束后把结果（两边的网络类型和公网 IP、有没有直连、用了多久、失败原因）发给会合服务器，用来改进打洞；不含文件名、好友名和任何密钥。</div>
+  </div>
+
+  <div class="card"><h2>日志</h2><div id="log"></div></div>
+</main>
+
+<div class="modal" id="inviteDlg"><div class="box">
+  <h2 style="margin-top:0">邀请好友</h2>
+  <img id="qr" alt="二维码">
+  <div class="dim" style="margin-top:10px">朋友当面就用手机相机扫码；不在身边就把邀请码发给他，他在 P2P 直传里点「加好友」粘贴。24 小时内有效，用一次就作废。这个页面开不开都行，后台会一直等他。</div>
+  <div class="code" id="code"></div>
+  <div class="row"><button class="blue" id="copyBtn">复制邀请码</button><button class="small" data-close>关闭</button></div>
+</div></div>
+
+<div class="modal" id="joinDlg"><div class="box">
+  <h2 style="margin-top:0">加好友</h2>
+  <div class="dim">粘贴朋友发来的邀请码（p2pcp://join/…，夹在别的字里也行）</div>
+  <textarea id="joinText" rows="4" style="margin-top:10px"></textarea>
+  <div class="detail" id="joinState"></div>
+  <div class="row"><button class="green" id="joinGo">加好友</button><button class="small" data-close>取消</button></div>
+</div></div>
+
+<input type="file" id="picker" multiple hidden>
+<div id="toast"></div>
+
+<script>
+const $ = id => document.getElementById(id);
+let state = null, pickFor = null, lastSeq = 0;
+const sendTo = {};   // 发送通道 → 好友名
+let recvJustDone = false;
+
+function toast(s) { const t = $('toast'); t.textContent = s; t.style.display = 'block'; clearTimeout(t._h); t._h = setTimeout(() => t.style.display = 'none', 3500); }
+async function post(url, body) {
+  const r = await fetch(url, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body || {}) });
+  const j = await r.json().catch(() => ({ error: r.statusText }));
+  if (!r.ok) throw j;
+  return j;
+}
+function errText(e) { return e.human ? `${e.human}：${e.action}\n（${e.error}）` : (e.error || String(e)); }
+function esc(s) { return String(s).replace(/[&<>"]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c])); }
+const base = p => p.split(/[\\/]/).pop();
+const hhmm = ms => new Date(ms).toTimeString().slice(0, 5);
+
+async function refresh() {
+  state = await (await fetch('/api/state')).json();
+  $('me').textContent = `${state.me.name} · ID ${state.me.id}`;
+  $('ver').textContent = 'p2pcp ' + state.version;
+  $('out').textContent = state.out;
+  $('upload').textContent = state.upload ? '开（点这里关掉）' : '关（点这里打开）';
+  const box = $('friends');
+  box.innerHTML = '';
+  if (!state.friends.length) box.innerHTML = '<div class="dim" style="padding:8px 0">还没有好友：点「邀请好友」把邀请码发给朋友，或者点「加好友」粘贴朋友给你的邀请码。</div>';
+  for (const f of state.friends) {
+    const row = document.createElement('div');
+    row.className = 'friend';
+    row.innerHTML = `<span class="name">${esc(f.name)}</span><span class="dim">${esc(f.id)}</span>
+      <button class="small" data-act="send">发送文件…</button><button class="small" data-act="more">⋯</button>`;
+    row.querySelector('[data-act=send]').onclick = () => { pickFor = f.name; $('picker').value = ''; $('picker').click(); };
+    row.querySelector('[data-act=more]').onclick = () => friendMenu(f.name);
+    row.ondragover = e => { e.preventDefault(); row.classList.add('drop'); };
+    row.ondragleave = () => row.classList.remove('drop');
+    row.ondrop = e => { e.preventDefault(); row.classList.remove('drop'); if (e.dataTransfer.files.length) sendFiles(f.name, e.dataTransfer.files); };
+    box.appendChild(row);
+  }
+}
+
+async function friendMenu(name) {
+  const to = prompt(`给「${name}」改名（清空并确定 = 删除这个好友）`, name);
+  if (to === null || to === name) return;
+  try {
+    if (to.trim() === '') {
+      if (!confirm(`删除好友「${name}」？删了之后他发来的文件这边不再接收，要重新加好友才行。`)) return;
+      await post('/api/friend', { op: 'rm', name });
+    } else {
+      await post('/api/friend', { op: 'rename', name, to });
+    }
+    refresh();
+  } catch (e) { alert(errText(e)); }
+}
+
+$('me').onclick = async () => {
+  const n = prompt('本机的名字（好友看到的就是它）', state.me.name);
+  if (!n || n === state.me.name) return;
+  try { await post('/api/me', { name: n }); refresh(); toast('改好了；已经加了的好友那边显示的还是旧名字，他们可以自己改'); } catch (e) { alert(errText(e)); }
+};
+
+$('picker').onchange = () => { if (pickFor && $('picker').files.length) sendFiles(pickFor, $('picker').files); };
+
+// 文件先经本机 HTTP 交给 p2pcp（临时目录），再由它发出去；交接的进度也显示
+function sendFiles(friend, files) {
+  const fd = new FormData();
+  fd.append('friend', friend);
+  let total = 0;
+  for (const f of files) { fd.append('file', f, f.name); total += f.size; }
+  const what = files.length === 1 ? files[0].name : `${files.length} 个文件`;
+  setPanel('send', `准备 ${what}（发给 ${friend}）`, '', 0, '');
+  const x = new XMLHttpRequest();
+  x.open('POST', '/api/send');
+  x.upload.onprogress = e => { if (e.lengthComputable) setPanel('send', `准备 ${what}（发给 ${friend}）`, '', e.loaded / e.total, `交给 P2P 直传：${(e.loaded / 1e6).toFixed(1)} / ${(e.total / 1e6).toFixed(1)} MB`); };
+  x.onload = () => {
+    const j = JSON.parse(x.responseText || '{}');
+    if (x.status !== 200) setPanel('send', '失败：' + (j.human || j.error), 'bad', 0, j.action || '');
+    else sendTo[j.ch] = j.friend;
+  };
+  x.onerror = () => setPanel('send', '失败：交给 P2P 直传时出错（它还在运行吗？）', 'bad', 0, '');
+  x.send(fd);
+}
+
+function setPanel(which, text, cls, frac, detail) {
+  if (text !== null) { $(which + 'State').textContent = text; $(which + 'State').className = 'state ' + (cls || ''); }
+  if (frac !== null) $(which + 'Bar').style.width = (frac * 100).toFixed(1) + '%';
+  if (detail !== null) $(which + 'Detail').textContent = detail;
+}
+
+function addRecord(at, html) {
+  const box = $('records');
+  if (box.firstChild && box.firstChild.classList && box.firstChild.classList.contains('dim')) box.innerHTML = '';
+  const d = document.createElement('div');
+  d.className = 'rec';
+  d.innerHTML = `<span class="t">${hhmm(at)}</span>${html}`;
+  box.prepend(d);
+  while (box.children.length > 50) box.lastChild.remove();
+}
+
+const reasons = {};   // 通道 → 最近一条 @REASON
+function handle(e, live) {
+  if (e.seq <= lastSeq) return;
+  lastSeq = e.seq;
+  const ch = e.ch, which = ch.startsWith('send') ? 'send' : ch === 'pair' ? 'join' : 'recv';
+  const line = e.line, f = line.split(' ');
+  // 日志卡片：进度以外的机器行（完整日志在缓存目录，诊断报告里有）
+  if (['@STATE', '@ERROR', '@CRASH'].includes(f[0])) {
+    const l = $('log');
+    l.textContent += `${new Date(e.at).toTimeString().slice(0, 8)} [${ch}] ${line.replace(/^@\w+ /, '')}\n`;
+    const lines = l.textContent.split('\n'); if (lines.length > 80) l.textContent = lines.slice(-80).join('\n');
+    l.scrollTop = l.scrollHeight;
+  }
+  switch (f[0]) {
+    case '@TO': sendTo[ch] = line.slice(4); break;
+    case '@STATE': {
+      const s = line.slice(7);
+      if (which === 'join') { $('joinState').textContent = s; break; }
+      if (which === 'recv' && recvJustDone && s.startsWith('等待好友发送')) break;
+      if (which === 'recv') recvJustDone = false;
+      setPanel(which, s, '', null, null);
+      break;
+    }
+    case '@PROGRESS': {
+      const done = +f[2], total = +f[3];
+      setPanel(which, null, null, total ? done / total : 0, `${(done / 1e6).toFixed(1)} / ${(total / 1e6).toFixed(1)} MB · ${f[4]} Mbps`);
+      break;
+    }
+    case '@DONE': {
+      const path = f.slice(5).join(' '), name = base(path);
+      const d = `${(+f[2] / 1e6).toFixed(1)} MB，用时 ${(+f[3]).toFixed(1)} 秒，平均 ${f[4]} Mbps`;
+      if (which === 'send') {
+        setPanel('send', `已发送 ${name}`, 'ok', 1, d);
+        addRecord(e.at, `已发送 <b>${esc(name)}</b> 给 ${esc(sendTo[ch] || '')} <span class="dim">${d}</span>`);
+      } else {
+        const from = base(path.slice(0, path.length - name.length - 1));
+        setPanel('recv', `已收到 ${name}`, 'ok', 1, `${d}\n已存到 ${path}`);
+        recvJustDone = true;
+        addRecord(e.at, `收到 ${esc(from)} 发来的 <b>${esc(name)}</b> <span class="dim">${d}</span>`);
+      }
+      break;
+    }
+    case '@REASON': {
+      const rest = line.split(' ').slice(2).join(' '), i = rest.indexOf('。');
+      reasons[ch] = { code: f[1], human: i < 0 ? rest : rest.slice(0, i), action: i < 0 ? '' : rest.slice(i + 1) };
+      break;
+    }
+    case '@ERROR': {
+      const r = reasons[ch]; delete reasons[ch];
+      const err = line.slice(7);
+      if (which === 'join') { $('joinState').textContent = r ? `${r.human}：${r.action}` : err; break; }
+      setPanel(which, '失败：' + (r ? r.human : err), 'bad', null, r ? `${r.action}\n（${err}，原因码 ${r.code}）` : '');
+      addRecord(e.at, `<span style="color:var(--red)">${which === 'send' ? '发给 ' + esc(sendTo[ch] || '') + ' 失败' : '接收失败'}</span>：${esc(r ? r.human : err)}`);
+      break;
+    }
+    case '@PAIRED':
+      if (live) { toast('加上新好友了'); $('inviteDlg').classList.remove('on'); }
+      refresh();
+      break;
+  }
+}
+
+function connect() {
+  const es = new EventSource('/api/events');
+  es.onmessage = m => handle(JSON.parse(m.data), true);
+  es.onerror = () => { $('recvState').textContent = '和 P2P 直传断开了（它退出了？），重连中……'; };
+  es.onopen = () => refresh().then(() => { for (const e of state.events) handle(e, false); });
+}
+
+$('inviteBtn').onclick = async () => {
+  try {
+    const j = await post('/api/invite');
+    $('qr').src = j.qr; $('code').textContent = j.code;
+    $('inviteDlg').classList.add('on');
+    refresh();
+  } catch (e) { alert(errText(e)); }
+};
+$('copyBtn').onclick = async () => {
+  const text = '加我 P2P 直传好友：' + $('code').textContent;
+  try { await navigator.clipboard.writeText(text); toast('已复制，去微信里粘贴发给朋友'); }
+  catch { const r = document.createRange(); r.selectNode($('code')); getSelection().removeAllRanges(); getSelection().addRange(r); toast('按 Ctrl+C 复制'); }
+};
+$('joinBtn').onclick = () => { $('joinText').value = ''; $('joinState').textContent = ''; $('joinDlg').classList.add('on'); $('joinText').focus(); };
+$('joinGo').onclick = async () => {
+  $('joinState').textContent = '连接邀请方……';
+  $('joinGo').disabled = true;
+  try {
+    const j = await post('/api/join', { code: $('joinText').value });
+    $('joinDlg').classList.remove('on');
+    toast(`已加好友「${j.name}」`);
+    refresh();
+  } catch (e) { $('joinState').textContent = errText(e); }
+  $('joinGo').disabled = false;
+};
+document.querySelectorAll('[data-close]').forEach(b => b.onclick = () => b.closest('.modal').classList.remove('on'));
+
+$('upload').onclick = async () => { try { await post('/api/upload', { on: !state.upload }); refresh(); } catch (e) { alert(errText(e)); } };
+$('reportBtn').onclick = async () => {
+  $('reportOut').textContent = '正在生成（要现测一次网络，十几秒）……';
+  try {
+    const j = await post('/api/report');
+    $('reportOut').innerHTML = `已生成：<a class="link" href="/api/report?name=${encodeURIComponent(j.name)}">下载诊断报告</a>（也存在 ${esc(j.path)}），发给我就行`;
+  } catch (e) { $('reportOut').textContent = errText(e); }
+};
+
+connect();
+</script>
+</body>
+</html>

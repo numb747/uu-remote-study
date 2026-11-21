@@ -15,6 +15,7 @@
 //	p2pcp contacts [rm 名字 | rename 旧名 新名]     好友列表
 //	p2pcp send -to 好友 文件...                    发给好友
 //	p2pcp serve [-o 目录]                          常驻接收所有好友发来的文件（按好友分目录），也替 invite 等对方来加好友
+//	p2pcp app [-no-browser] [-o 目录]            桌面版：常驻接收 + 本机网页界面（app.go），已经在跑时只打开浏览器
 //	p2pcp report [文件]                           诊断报告：现测一次网络 + 最近的连接记录、连接过程、日志、崩溃现场（diag.go），
 //	                                             好友名和文件名换成代号，可以直接发微信
 //
@@ -128,7 +129,7 @@ func main() {
 	}
 	role := os.Args[1]
 	switch role {
-	case "send", "recv", "daemon", "check", "expose", "forward", "serve", "id", "invite", "join", "contacts", "report":
+	case "send", "recv", "daemon", "check", "expose", "forward", "serve", "id", "invite", "join", "contacts", "report", "app":
 	default:
 		usage()
 	}
@@ -164,6 +165,7 @@ func main() {
 		"手机后台可以拉长到 20s 省电（对方来时最多晚一个间隔被配上）")
 	fs.StringVar(&o.listen, "listen", "127.0.0.1:2223", "forward：本地监听地址")
 	fs.DurationVar(&o.timeout, "timeout", 60*time.Second, "等对方的超时（daemon 模式下无效）")
+	noBrowser := fs.Bool("no-browser", false, "app：不打开浏览器（开机自启用）")
 	upload := fs.String("upload", "", "诊断数据上报：on | off，记进配置目录的 settings.json，以后一直有效（默认开，见 upload.go）")
 	progress := fs.Bool("progress", false, "在 stdout 输出机器可读的进度行")
 	notify := fs.Bool("notify", false, "用 notify-send 弹桌面通知")
@@ -183,7 +185,7 @@ func main() {
 		o.server = serverConf()
 	}
 	// 不碰网络的命令、会合地址另有来处的命令（join 听邀请码的，send -to 听好友记录的，serve 每个好友各有地址）不要求 -server
-	needServer := !(role == "id" || role == "contacts" || role == "join" || role == "serve" || role == "report" || o.friend != "")
+	needServer := !(role == "id" || role == "contacts" || role == "join" || role == "serve" || role == "report" || role == "app" || o.friend != "")
 	if o.server == "" && needServer {
 		log.Fatal("没有会合服务器：用 -server IP:7001 指定，或者写进 ~/.config/p2pcp/server（也认环境变量 P2PCP_SERVER）。" +
 			"在一台有公网 IP 的机器上跑 punch server -listen :7001 -relay :3478，放行 UDP 7001 和 3478")
@@ -239,6 +241,8 @@ func main() {
 		err = cmdContacts(o, fs.Args())
 	case "report":
 		err = cmdReport(o, fs.Args())
+	case "app":
+		err = cmdApp(o, *noBrowser)
 	case "recv":
 		err = recv(o)
 	case "check":
@@ -334,6 +338,7 @@ func usage() {
 	fmt.Println("usage: p2pcp send|recv|daemon|check|expose|forward [flags] [文件...]")
 	fmt.Println("       p2pcp id | invite | join <邀请码> | contacts | send -to 好友 文件... | serve   通讯录模式")
 	fmt.Println("       p2pcp check              本机这一侧的网络体检")
+	fmt.Println("       p2pcp app                桌面版：常驻接收 + 本机网页界面")
 	fmt.Println("       p2pcp report             生成诊断报告（-upload on|off 开关诊断数据上报）")
 	fmt.Println("       p2pcp check -room 名字    两端各跑一次：双端体检（画像、预测、实际打洞、往返和丢包、中继）")
 	os.Exit(2)

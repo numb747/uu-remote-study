@@ -58,11 +58,14 @@ func cmdID(o opts) error {
 	return nil
 }
 
-// cmdInvite 生成邀请码，记进通讯录的待用邀请（serve 会在后台等对方来用）
-func cmdInvite(o opts) error {
+// newInvite 生成邀请码，记进通讯录的待用邀请（serve 会在后台等对方来用）
+func newInvite(o opts) (string, error) {
 	dir := configDir(o)
 	if _, err := loadIdentity(dir); err != nil {
-		return err
+		return "", err
+	}
+	if o.server == "" {
+		return "", errors.New("没有会合服务器地址")
 	}
 	secret := make([]byte, 16)
 	rand.Read(secret)
@@ -70,9 +73,27 @@ func cmdInvite(o opts) error {
 		b.Invites = append(b.Invites, pendingInvite{Secret: secret, Server: o.server, Expires: time.Now().Add(o.ttl)})
 		return nil
 	}); err != nil {
+		return "", err
+	}
+	return encodeInvite(secret, o.server), nil
+}
+
+// qrPNG 把文字编成二维码 PNG
+func qrPNG(text string) ([]byte, error) {
+	c, err := qr.Encode(text, qr.M)
+	if err != nil {
+		return nil, err
+	}
+	c.Scale = 8
+	return c.PNG(), nil
+}
+
+// cmdInvite 生成邀请码并打印（-qr 时出二维码）
+func cmdInvite(o opts) error {
+	code, err := newInvite(o)
+	if err != nil {
 		return err
 	}
-	code := encodeInvite(secret, o.server)
 	fmt.Printf("邀请码（%v 内有效，用一次就作废）：\n\n%s\n\n", o.ttl, code)
 	fmt.Println("发给朋友，对方运行 p2pcp join <邀请码>（App 里点「加好友」粘贴）。你这边的常驻接收（p2pcp serve）要开着，对方才加得上。")
 	o.rep.line("@INVITE %s", code)
@@ -81,12 +102,11 @@ func cmdInvite(o opts) error {
 	case "-":
 		printQR(code)
 	default:
-		c, err := qr.Encode(code, qr.M)
+		png, err := qrPNG(code)
 		if err != nil {
 			return err
 		}
-		c.Scale = 8
-		if err := os.WriteFile(o.qr, c.PNG(), 0o644); err != nil {
+		if err := os.WriteFile(o.qr, png, 0o644); err != nil {
 			return err
 		}
 	}
@@ -121,42 +141,47 @@ func printQR(text string) {
 
 // cmdJoin 用邀请码加好友
 func cmdJoin(o opts, text string) error {
+	_, err := join(o, text)
+	return err
+}
+
+// join 用邀请码加好友，返回对方在通讯录里的名字
+func join(o opts, text string) (final string, err error) {
 	secret, server, err := parseInvite(text)
 	if err != nil {
-		return err
+		return "", err
 	}
 	dir := configDir(o)
 	id, err := loadIdentity(dir)
 	if err != nil {
-		return err
+		return "", err
 	}
 	o.secret, o.server, o.stun = secret, server, "off" // 加好友不用体检；会合地址听邀请码的
 	o.rep.state("连接邀请方……")
 	l, err := dialPeer(o, pairALPN)
 	if err != nil {
-		return fmt.Errorf("连不上邀请方（邀请码过期了、用过了，或者对方的常驻接收没开）：%w", err)
+		return "", fmt.Errorf("连不上邀请方（邀请码过期了、用过了，或者对方的常驻接收没开）：%w", err)
 	}
 	defer l.close()
 	peer, err := clientCards(l.conn, card{V: 1, Name: id.Name, Pub: id.pub()})
 	if err != nil {
-		return err
+		return "", err
 	}
 	if bytes.Equal(peer.Pub, id.pub()) {
-		return errors.New("这是你自己发出的邀请码")
+		return "", errors.New("这是你自己发出的邀请码")
 	}
 	name := cleanName(o.name)
 	if name == "" {
 		name = peer.Name
 	}
-	var final string
 	if err := updateBook(dir, func(b *book) error {
 		final = b.addContact(contact{Name: name, Pub: peer.Pub, Server: server, Added: time.Now()})
 		return nil
 	}); err != nil {
-		return err
+		return "", err
 	}
 	reportPaired(o, final, peer.Pub)
-	return nil
+	return final, nil
 }
 
 func reportPaired(o opts, name string, pub []byte) {
@@ -229,35 +254,55 @@ func serveCards(conn *quic.Conn, mine card, accept func(peer card) error) (card,
 	return peer, nil
 }
 
+// rmContact 删好友，返回删掉的名字
+func rmContact(dir, q string) (name string, err error) {
+	err = updateBook(dir, func(b *book) error {
+		c, err := b.find(q)
+		if err != nil {
+			return err
+		}
+		name = c.Name
+		b.Contacts = append(b.Contacts[:b.byName(c.Name)], b.Contacts[b.byName(c.Name)+1:]...)
+		return nil
+	})
+	return
+}
+
+// renameContact 给好友改名，返回旧名和新名
+func renameContact(dir, q, to string) (old, name string, err error) {
+	err = updateBook(dir, func(b *book) error {
+		c, err := b.find(q)
+		if err != nil {
+			return err
+		}
+		name = cleanName(to)
+		if name == "" || b.byName(name) >= 0 {
+			return fmt.Errorf("新名字「%s」不能用（空的或者和别的好友重了）", to)
+		}
+		old = c.Name
+		b.Contacts[b.byName(c.Name)].Name = name
+		return nil
+	})
+	return
+}
+
 // cmdContacts 列出好友；contacts rm 名字 / contacts rename 旧名 新名
 func cmdContacts(o opts, args []string) error {
 	dir := configDir(o)
 	switch {
 	case len(args) == 0:
 	case args[0] == "rm" && len(args) == 2:
-		return updateBook(dir, func(b *book) error {
-			c, err := b.find(args[1])
-			if err != nil {
-				return err
-			}
-			b.Contacts = append(b.Contacts[:b.byName(c.Name)], b.Contacts[b.byName(c.Name)+1:]...)
-			fmt.Printf("已删除好友「%s」（对方那边也要删，否则它发过来时这边不再接收）\n", c.Name)
-			return nil
-		})
+		name, err := rmContact(dir, args[1])
+		if err == nil {
+			fmt.Printf("已删除好友「%s」（对方那边也要删，否则它发过来时这边不再接收）\n", name)
+		}
+		return err
 	case args[0] == "rename" && len(args) == 3:
-		return updateBook(dir, func(b *book) error {
-			c, err := b.find(args[1])
-			if err != nil {
-				return err
-			}
-			name := cleanName(args[2])
-			if name == "" || b.byName(name) >= 0 {
-				return fmt.Errorf("新名字「%s」不能用（空的或者和别的好友重了）", args[2])
-			}
-			b.Contacts[b.byName(c.Name)].Name = name
-			fmt.Printf("「%s」改名为「%s」\n", c.Name, name)
-			return nil
-		})
+		old, name, err := renameContact(dir, args[1], args[2])
+		if err == nil {
+			fmt.Printf("「%s」改名为「%s」\n", old, name)
+		}
+		return err
 	default:
 		return errors.New("用法：p2pcp contacts [rm 名字 | rename 旧名 新名]")
 	}
