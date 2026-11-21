@@ -12,6 +12,7 @@ package main
 // 任何一方带了这个标志，双方都改去会合服务器的中继端口（同一 IP 的 UDP 3478），QUIC 照常握手、端到端认证。
 
 import (
+	"cmp"
 	"crypto/rand"
 	"encoding/hex"
 	"errors"
@@ -34,6 +35,7 @@ type session struct {
 	peer    *net.UDPAddr // 直连时是对方地址，中继时是中继地址
 	server  *net.UDPAddr // 这次用的会合服务器（连接迁移时继续用它）
 	relayed bool
+	control bool          // 本端是 QUIC 发起方（send，或 check 里 id 大的一端）
 	took    time.Duration // 从开始注册到打通（含重试）
 	punch   time.Duration // 成功那一轮的打洞（或进中继）用时
 	rounds  int           // 第几轮连上的
@@ -70,6 +72,11 @@ func connect(o opts, rid, role string) (*session, error) {
 	first := int(goodServer.Load())
 	start := time.Now()
 	id := role + "." + randHex(4)
+	if role == "check" {
+		// check -room 两端跑的是同一条命令：各取一个随机角色名，会合服务器只给角色不同的两人配对，
+		// 配上之后按 id 大小定谁发起（isControlling）
+		id = "chk" + randHex(3) + "." + randHex(4)
+	}
 	var (
 		err      error
 		punchTOs int // 拿到了对方地址、却没打通的轮数
@@ -79,7 +86,7 @@ func connect(o opts, rid, role string) (*session, error) {
 		// 发送端两轮打不通就请求中继（接收端看到对方的标志会跟着去，打洞中途也会跟）；
 		// 体检预测打不通时，一轮不通就请求（DESIGN 决策 2：仍短打一轮，万一预测错了还能直连）
 		early := punchTOs == 1 && o.pre.predictedNo()
-		relay := o.relay == "always" || o.relay == "auto" && role == "send" && (punchTOs >= 2 || early)
+		relay := o.relay == "always" || o.relay == "auto" && role != "recv" && (punchTOs >= 2 || early)
 		if relay && early && o.relay == "auto" {
 			log.Print("体检预测打不通，这一轮直接请求中继")
 		}
@@ -117,6 +124,18 @@ func connect(o opts, rid, role string) (*session, error) {
 }
 
 var goodServer atomic.Int32 // 上次打通用的是第几个会合地址
+
+// isControlling：本端是不是发起方（QUIC Dial、发提名、中继键用它的 id）。send 是、recv 不是；
+// check 两端对等，id 大的一端发起，两边算出来的结果一致
+func isControlling(id, peerID string) bool {
+	switch {
+	case strings.HasPrefix(id, "send."):
+		return true
+	case strings.HasPrefix(id, "recv."):
+		return false
+	}
+	return id > peerID
+}
 
 var (
 	errPunchTimeout = errors.New("打洞超时")
@@ -217,8 +236,9 @@ func connectOnce(o opts, server, rid, id string, wantRelay bool) (*session, erro
 		return out
 	}
 
-	// 1. 注册，等 PEER。第一次注册前给画像 50ms：命中缓存时这就够了，第一次注册就带得上 nat=
-	o.pre.wait(50 * time.Millisecond)
+	// 1. 注册，等 PEER。第一次注册前给画像 50ms：命中缓存时这就够了，第一次注册就带得上 nat=。
+	// check -room 是诊断，不在乎这一会儿，等画像测完（preWait），保证两端互相拿得到
+	o.pre.wait(cmp.Or(o.preWait, 50*time.Millisecond))
 	var (
 		peerCands []*net.UDPAddr
 		peerID    string
@@ -292,7 +312,7 @@ func connectOnce(o opts, server, rid, id string, wantRelay bool) (*session, erro
 	// 打洞期间继续每 500ms 注册一次，打完（通了、超时、改走中继）再注销：服务器每收到一次注册就把双方地址再推一遍，
 	// 推给对方的那个 PEER 万一丢了，半秒后还有下一个；而不是像以前那样拿到地址就注销，对方漏收一个包就白等一轮。
 	// 注销还是要的：否则服务器在 30 秒内还会把这次的旧地址推给下一次注册的人
-	controlling := strings.HasPrefix(id, "send.")
+	controlling := isControlling(id, peerID)
 
 	// goRelay 去中继报到。凑齐之前不注销、继续注册：先进新一轮的一方拿到的可能是对方上一轮的旧注册，
 	// 它一注销，对方新一轮注册时房间里就找不到它、看不到 relay 标志，只能干等它在中继上 6 秒超时再来一轮
@@ -315,7 +335,7 @@ func connectOnce(o opts, server, rid, id string, wantRelay bool) (*session, erro
 			return nil, err
 		}
 		log.Printf("%s，改走中继 %s（%v）", why, relay, time.Since(t0).Round(time.Millisecond))
-		return &session{conn: c, peer: relay, server: srv, relayed: true, took: time.Since(t0)}, nil
+		return &session{conn: c, peer: relay, server: srv, relayed: true, took: time.Since(t0), control: controlling}, nil
 	}
 	if useRelay {
 		return goRelay("打洞不通")
@@ -407,13 +427,17 @@ func connectOnce(o opts, server, rid, id string, wantRelay bool) (*session, erro
 					choose(c, from)
 					return
 				}
+			// 发起方选定路径后先发 3 个 /PN 再 QUIC Dial。非发起方见到 /PN（或者 /PN 全丢了、先见到 QUIC Initial）
+			// 就说明这条路两个方向都通，马上停：要是还等自己那份 /PA，这个 listen 会把紧跟着到的 Initial 当成无关的包
+			// 读走扔掉，发起方要等 quic-go 的 PTO 重传（约 200ms，连丢几次就是 docs/13 那次「打洞 118ms、握手 4.4s」）。
+			// listen 退出后来的包留在内核缓冲区里，QUIC 接管后照常读到。netns check -room：full ↔ sym 握手 202ms → 1ms
 			case msgNom:
-				if waitNom {
+				if !controlling {
 					choose(c, from)
 					return
 				}
 			default:
-				if waitNom && n >= 1200 && buf[0]&0x80 != 0 { // QUIC Initial：长包头，至少补到 1200 字节
+				if !controlling && n >= 1200 && buf[0]&0x80 != 0 { // QUIC Initial：长包头，至少补到 1200 字节
 					choose(c, from)
 					return
 				}
@@ -482,7 +506,7 @@ func connectOnce(o opts, server, rid, id string, wantRelay bool) (*session, erro
 				}
 			}
 			chosenOn.SetReadDeadline(time.Time{})
-			return &session{conn: chosenOn, peer: chosen, server: srv, took: time.Since(punchStart)}, nil
+			return &session{conn: chosenOn, peer: chosen, server: srv, took: time.Since(punchStart), control: controlling}, nil
 		case <-relayNow:
 			stopListeners()
 			return goRelay(fmt.Sprintf("对方已改走中继（打洞 %v 时）", time.Since(punchStart).Round(time.Millisecond)))

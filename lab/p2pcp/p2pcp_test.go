@@ -10,6 +10,7 @@ import (
 	"os"
 	"reflect"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -18,6 +19,11 @@ import (
 
 // quicPair 在本机回环上建一对 QUIC 连接
 func quicPair(t *testing.T) (client, server *quic.Conn) {
+	t.Helper()
+	return quicPairALPN(t, alpn)
+}
+
+func quicPairALPN(t *testing.T, alpn string) (client, server *quic.Conn) {
 	t.Helper()
 	tc, err := selfSigned(alpn)
 	if err != nil {
@@ -502,5 +508,47 @@ func TestSettleHistory(t *testing.T) {
 	b, _ = os.ReadFile(historyPath())
 	if n := strings.Count(string(b), "\n"); n != 2 || !strings.Contains(string(b), `"actual":"失败"`) {
 		t.Fatalf("失败没记上：%s", b)
+	}
+}
+
+func TestIsControlling(t *testing.T) {
+	if !isControlling("send.ab", "recv.cd") || isControlling("recv.cd", "send.ab") {
+		t.Fatal("send 发起、recv 不发起")
+	}
+	a, b := "chk1a2b3c.0001", "chk9f8e7d.0002"
+	if isControlling(a, b) == isControlling(b, a) {
+		t.Fatal("check 两端必须恰好一端发起")
+	}
+}
+
+func TestPingStats(t *testing.T) {
+	p := pingStats{sent: 10, rtts: []time.Duration{30, 10, 20, 40, 50, 60, 70, 80, 90}}
+	for i := range p.rtts {
+		p.rtts[i] *= time.Millisecond
+	}
+	if l := p.loss(); l < 0.099 || l > 0.101 {
+		t.Errorf("丢包应为 10%%，得到 %v", l)
+	}
+	if s := p.String(); !strings.Contains(s, "中位 50ms") || !strings.Contains(s, "最大 90ms") || !strings.Contains(s, "丢包 10.0%") {
+		t.Errorf("格式不对：%s", s)
+	}
+	if s := (pingStats{sent: 3}).String(); !strings.Contains(s, "一个回音都没有") {
+		t.Errorf("全丢：%s", s)
+	}
+}
+
+// TestPingPong 回环上两端同时互 ping：零丢包，两边都等到对方的 /fin 才收尾
+func TestPingPong(t *testing.T) {
+	c, s := quicPairALPN(t, checkALPN)
+	var wg sync.WaitGroup
+	var a, b pingStats
+	wg.Add(2)
+	go func() { defer wg.Done(); a = pingPong(c, time.Second) }()
+	go func() { defer wg.Done(); time.Sleep(300 * time.Millisecond); b = pingPong(s, time.Second) }() // 晚开始的一端也不丢
+	wg.Wait()
+	for i, p := range []pingStats{a, b} {
+		if p.sent < 15 || p.loss() != 0 {
+			t.Errorf("第 %d 端：%s", i, p)
+		}
 	}
 }

@@ -4,6 +4,7 @@
 //	p2pcp daemon -room demo [-o 目录]              常驻：可以同时接好几个发送端
 //	p2pcp send   -room demo [-conns 2] 文件...     发送（多个文件在同一次连接里依次发；断了自动重连、断点续传）
 //	p2pcp check                                   网络体检：会合端口通不通、有没有"毒端口"、NAT 映射、IPv6、中继（check.go）
+//	p2pcp check -room demo                        两端各跑一次：双端体检，画像、预测、实际打洞、往返和丢包、中继（check.go）
 //	p2pcp expose  -room demo [-to 127.0.0.1:22]       常驻：把本机一个 TCP 端口经打洞暴露给对方（tunnel.go）
 //	p2pcp forward -room demo [-listen 127.0.0.1:2223] 本机端口转发到 expose 那端，比如 rsync 走 ssh -p 2223
 //
@@ -89,6 +90,9 @@ type opts struct {
 	regEvery time.Duration // 注册间隔
 	stun     string        // 体检用的公开 STUN，逗号分隔；off = 不体检
 	pre      *preflight    // 这次 connect 的体检（connect 里填）
+	fresh    bool          // 画像不用缓存、现测（check -room）
+	preWait  time.Duration // 第一次注册前最多等本机画像多久（0 = 50ms；check -room 要等它测完）
+	roomSet  bool          // 命令行给了 -room（check 带 -room 时做双端体检）
 	rep      *reporter
 }
 
@@ -127,6 +131,7 @@ func main() {
 	progress := fs.Bool("progress", false, "在 stdout 输出机器可读的进度行")
 	notify := fs.Bool("notify", false, "用 notify-send 弹桌面通知")
 	fs.Parse(os.Args[2:])
+	fs.Visit(func(f *flag.Flag) { o.roomSet = o.roomSet || f.Name == "room" })
 	log.SetFlags(log.Ltime | log.Lmicroseconds)
 	if o.server == "" {
 		o.server = serverConf()
@@ -215,5 +220,7 @@ func exitGracefully() {
 
 func usage() {
 	fmt.Println("usage: p2pcp send|recv|daemon|check|expose|forward [flags] [文件...]")
+	fmt.Println("       p2pcp check              本机这一侧的网络体检")
+	fmt.Println("       p2pcp check -room 名字    两端各跑一次：双端体检（画像、预测、实际打洞、往返和丢包、中继）")
 	os.Exit(2)
 }

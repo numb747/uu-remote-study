@@ -33,6 +33,13 @@ type preflight struct {
 	settled  bool          // 结果已经报过、记过
 }
 
+// snapshot 给 check -room 的报告用：本机画像、对方画像（没收到时 ok2 为 false）、预测
+func (p *preflight) snapshot() (me *profile, peer profile, havePeer bool, v verdict) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return p.me, p.peer, p.havePeer, p.verdict
+}
+
 // predictedNo：已经预测出「打不通」（connect 的重试策略用：一轮不通就请求中继）
 func (p *preflight) predictedNo() bool {
 	if p == nil {

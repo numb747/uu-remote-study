@@ -33,7 +33,7 @@ func cachedProfile(o opts) profile {
 	fp := netFingerprint(o)
 	path := profileCachePath()
 	cache := loadProfileCache(path)
-	if e, ok := cache[fp]; ok && time.Since(e.At) < profileTTL && e.Profile.Class != "" {
+	if e, ok := cache[fp]; ok && !o.fresh && time.Since(e.At) < profileTTL && e.Profile.Class != "" {
 		p := e.Profile
 		p.V6, p.CachedAt, p.Took = v6, e.At, 0
 		return p

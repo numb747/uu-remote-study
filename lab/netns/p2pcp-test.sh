@@ -11,6 +11,7 @@
 #   tunnel   expose/forward 回显；中途三次把 forward 正在用的 UDP 端口封掉，每次都迁移到新洞上，TCP 会话不断
 #   upgrade  forward 先强制走中继，15 秒后自己打通直连并迁移过去，TCP 会话不断
 #   preflight 体检：两端的画像（按 $NAT_A / $NAT_B 核对类别）和组合预测，再传一个小文件
+#   checkpair 两端同时 p2pcp check -room：报告里的预测、实测、往返、中继、结论要和 NAT 组合对得上
 #   desync   人为让两端的打洞轮次错开（B 晚 1.5 秒拿到 /P，前 4.5 秒 A→B 直连全丢）：B 应从重推的 /P 学到 A 的新地址，
 #            或者看到 A 的 relay 标志中途跟进中继，而不是各打满各的一轮（放在 preflight 之后跑，要用它留下的画像缓存）
 #
@@ -20,7 +21,7 @@ B=$BIN_DIR
 W=$(mktemp -d /tmp/p2pcp-test.XXXX)
 SRV=192.0.2.1:7001,192.0.2.1:7000
 ROOM=lab-$RANDOM-$RANDOM
-TESTS=${TESTS:-preflight desync send resume reconn tunnel upgrade}
+TESTS=${TESTS:-preflight desync checkpair send resume reconn tunnel upgrade}
 A() { ip netns exec peerA "$@"; }
 Bn() { ip netns exec peerB "$@"; }
 # 后台跑：$! 就是 p2pcp 进程本身（ip netns exec 会 exec 过去），kill 得到
@@ -155,6 +156,26 @@ t_desync() {
 		grep -q '对方已改走中继' "$W/ds-recv.log" && ((t > 3000 && t < 5200)) && ok "B 打洞中途跟进了中继：$(grep -o '对方已改走中继[^，]*' "$W/ds-recv.log")，A ${t}ms" ||
 			bad "B 没有中途跟进中继：A ${t}ms，B：$(grep -o '[^ ]*改走中继[^（]*' "$W/ds-recv.log")"
 	fi
+}
+
+t_checkpair() {
+	echo "== checkpair：两端同时 check -room（natA=$NAT_A natB=$NAT_B）"
+	local ca cb want path verdict
+	ca=$(want_class "$NAT_A") cb=$(want_class "$NAT_B")
+	case "$ca/$cb" in sym/sym | sym/port | port/sym) want=打不通 path=中继 verdict="✘ 打不通直连" ;; *) want=能直连 path=直连 verdict="✔ 能点对点直连" ;; esac
+	bgB "$B/p2pcp" check -server "$SRV" -room "$ROOM.ck" -timeout 30s >"$W/ck-B.log" 2>&1
+	local r=$!
+	A "$B/p2pcp" check -server "$SRV" -room "$ROOM.ck" -timeout 30s >"$W/ck-A.log" 2>&1
+	wait $r
+	local x
+	for x in A B; do
+		if grep -q "^预测   $want" "$W/ck-$x.log" && grep -q "^实测   $path" "$W/ck-$x.log" && grep -q "^结论   $verdict" "$W/ck-$x.log" &&
+			grep -q "丢包 0.0%" "$W/ck-$x.log" && grep -q "^中继   ✔" "$W/ck-$x.log"; then
+			ok "$x：$(grep -h '^实测\|^往返' "$W/ck-$x.log" | sed 's/^[^ ]* *//' | paste -sd '|')"
+		else
+			bad "$x 的报告不对：$(grep -A8 '双端体检' "$W/ck-$x.log" | tr '\n' '|')"
+		fi
+	done
 }
 
 pf_round() { # <序号> <接收端先等几秒> [额外参数]：接收端先挂着，再让发送端发一个小文件

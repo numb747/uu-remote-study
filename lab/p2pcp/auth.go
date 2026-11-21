@@ -40,6 +40,11 @@ func mac(key []byte, parts ...[]byte) []byte {
 	return m.Sum(nil)
 }
 
+// checkRoomID 是 check -room 用的房间号：和传文件的房间分开，同一个房间名下正在跑的 daemon 不会被它配上
+func checkRoomID(secret []byte) string {
+	return hex.EncodeToString(mac(secret, []byte("check"))[:16])
+}
+
 // roomID 是会合服务器上用的房间号
 func roomID(secret []byte) string {
 	return hex.EncodeToString(mac(secret, []byte("rendezvous"))[:16])

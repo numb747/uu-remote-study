@@ -47,6 +47,9 @@ func quicConf(alpn string) *quic.Config {
 		// 新包就直接改发往那里。quic-go 自带的路径验证在这里会卡死，见 tunnel.go migrate
 		DisablePathManager: true,
 	}
+	if alpn == checkALPN {
+		c.EnableDatagrams = true // check -room 测往返和丢包（check.go pingPong）
+	}
 	if alpn == tunALPN {
 		// 隧道：2 秒一个保活，路径断了 forward 端最多 5 秒就能察觉、去打新洞迁移（tunnel.go）；
 		// 空闲超时留够迁移的时间（打洞 0.1~4 秒 + 验证路径）
