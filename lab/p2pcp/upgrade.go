@@ -1,6 +1,6 @@
 package main
 
-// 传文件走中继时，后台升级到直连（docs/arch/DESIGN.md 决策 3、26，图 26 的 upgrade）。
+// 传文件走中继时，后台升级到直连（docs/arch/designs/2026-11-21-preflight.md 决策 3、26，图 26 的 upgrade）。
 //
 // 发送端（upgrader）：中继会话开始 15 秒后，开新 socket 在「升级房间」里和接收端打洞，打不通就把间隔翻倍（最长 2 分钟）
 // 再试。打通了就在新洞上 QUIC Dial、认证，然后关掉中继会话：正在发的块报错，sendSession 带着这条直连返回，

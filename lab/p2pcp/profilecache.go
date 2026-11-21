@@ -1,6 +1,6 @@
 package main
 
-// 画像缓存（docs/arch/DESIGN.md 决策 1、待定里的缓存键）：同一个网络里 NAT 行为不会每分钟变，没必要每次都问 STUN。
+// 画像缓存（docs/arch/designs/2026-11-21-preflight.md 决策 1、待定里的缓存键）：同一个网络里 NAT 行为不会每分钟变，没必要每次都问 STUN。
 //
 // 键 = 网络指纹：本机出口 IP + main 表默认路由的网卡和网关 + STUN / 会合服务器清单。换了网络（出口 IP、网关变了）
 // 自然对不上；手机 App 换网时本来就会重启 daemon。30 分钟过期。只缓存 IPv4 的部分，有没有 IPv6 每次现查（很便宜）。

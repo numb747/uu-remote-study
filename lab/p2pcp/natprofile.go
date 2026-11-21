@@ -1,6 +1,6 @@
 package main
 
-// 本机 NAT 画像：先体检、再直传（docs/arch/DESIGN.md，图 33-nat-profile）。
+// 本机 NAT 画像：先体检、再直传（docs/arch/designs/2026-11-21-preflight.md，图 33-nat-profile）。
 //
 // 映射行为：开一个 socket，同时问几台不同 IP 的公开 STUN。各台看到的映射都一样 = EIM（映射与目的地无关），
 // 不一样 = EDM（对称型：每换一个目的地就换一个端口，对方从会合服务器拿到的那个端口对它没用）。

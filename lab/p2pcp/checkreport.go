@@ -1,6 +1,6 @@
 package main
 
-// 体检的结论：结果行、预测记录、@CHECK（docs/arch/DESIGN.md 实现顺序第 5 步，图 26 的 report / history）。
+// 体检的结论：结果行、预测记录、@CHECK（docs/arch/designs/2026-11-21-preflight.md 实现顺序第 5 步，图 26 的 report / history）。
 //
 // 传输会话结束时（或者打洞彻底失败时）由 preflight.settle 写：
 //   - 日志里一行「体检  结果：…」：实际走的路、建连耗时拆成会合 + 打洞和 QUIC 握手 + 认证两段、预测对没对上

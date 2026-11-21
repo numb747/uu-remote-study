@@ -1,6 +1,6 @@
 package main
 
-// 组合预测：两端画像 → 能不能直连、为什么（docs/arch/DESIGN.md 决策 8）。
+// 组合预测：两端画像 → 能不能直连、为什么（docs/arch/designs/2026-11-21-preflight.md 决策 8）。
 //
 // 依据 netns 实验室的 4×4 矩阵（docs/06 第 1.1 节）：
 //   - 两端都是 EIM（cone / port 任意组合）：会合服务器给的映射就是对方要打的地址，能通

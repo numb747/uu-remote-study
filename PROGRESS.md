@@ -107,7 +107,7 @@
 - 99-server 上留下的东西：iroh-relay 1.5.0 在 `/opt/iroh-relay/`（配置和 token 只有 root 能读），用 `systemd-run` 临时单元 `iroh-relay-test` 跑（`RuntimeMaxSec=1d`，重启服务器后不会再起来）；snap 版 certbot 5.10 和 Let's Encrypt IP 证书 `/etc/letsencrypt/live/8.140.18.211/`（6 天，自动续期，续期时临时占用 TCP 80）；安全组新开了 UDP 7842（iroh 的 QAD 用）。
 
 ### 0.5.11 p2pcp「先体检、再直传」：第 1~6 步完成（2026-11-21，交接；第 7、8 步见 0.5.12）
-- **设计和进度都在 [docs/arch/DESIGN.md](docs/arch/DESIGN.md)**（25 条决策、8 步实现顺序，每步附验证结果），图 26-flow-preflight / 33-nat-profile。新会话从「实现顺序」里第一个没勾的步骤接着做，已定的事不再讨论。
+- **设计和进度都在 [docs/arch/designs/2026-11-21-preflight.md](docs/arch/designs/2026-11-21-preflight.md)**（25 条决策、8 步实现顺序，每步附验证结果），图 26-flow-preflight / 33-nat-profile。新会话从「实现顺序」里第一个没勾的步骤接着做，已定的事不再讨论。
 - 已完成：本机 NAT 画像（公开 STUN 测映射 + 会合服务器 `/FT` 测过滤，分 open / cone / port / sym，按网络缓存 30 分钟）→ 经 `/R2` 的 `nat=` 标志交换 → 4×4 矩阵预测 → 预测打不通时一轮不通就走中继 → 传输结束打结果行、写 `~/.cache/p2pcp/history.jsonl`、`-progress` 输出 `@CHECK` → `p2pcp check -room 名字`（两端各跑一次，双端体检报告）。
 - 途中修掉的原有问题（都有 netns 用例或对照）：两端打洞轮次错位（port ↔ port 偶发 15 秒被迫走中继）；进中继时立刻注销导致对方找不到（中继偶发 10~14 秒）；cone ↔ sym 只补发一次 /PP 的竞态；非发起方吞掉 QUIC Initial（docs/13 那次「打洞 118ms、握手 4.4s」）。
 - **第 7 步「走中继时后台打洞，打通就升级到直连」已完成**（DESIGN 决策 26~28；netns 和真实网络 PC ↔ 手机 Wi-Fi / 5G 都验证过，20MB 全程约 19 秒，全走中继约 47 秒）。

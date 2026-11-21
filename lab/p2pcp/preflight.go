@@ -1,6 +1,6 @@
 package main
 
-// preflight 是一次 connect 的体检：本机画像、对方经会合报来的画像、组合预测（docs/arch/DESIGN.md，图 26-flow-preflight）。
+// preflight 是一次 connect 的体检：本机画像、对方经会合报来的画像、组合预测（docs/arch/designs/2026-11-21-preflight.md，图 26-flow-preflight）。
 //
 // 和会合并行：connect 一开始就在后台测本机画像（缓存命中时几乎立刻就有），不等它；画像出来之后的每次注册都带上 nat=。
 // 对方的画像也可能来得晚（它的画像还没测完时注册的那几次不带 nat=），所以打洞期间服务器重推的 /P 也要看（rdv.go listen）。

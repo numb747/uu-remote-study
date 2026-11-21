@@ -1,3 +1,8 @@
+## 2026-11-21 · 设计中：P2P 直传给朋友用（arch-design）
+
+- 新设计 `DESIGN.md`（上一份「先体检、再直传」已完成，归档到 `designs/2026-11-21-preflight.md`）。新图 27-flow-pairing（邀请码加好友 → 互换名片 → 配对密钥 → 通讯录 → serve / send -to）和 34-contacts（安卓 App、桌面版本地网页、系统集成、Go 核心的新命令、身份和通讯录文件、发布），新节点都是 `planned`。
+- 总览：加 planned 节点 `contacts`（链到 27 号图）和 `desk`（链到 34 号图）；用户节点改成「我 / 朋友」。为腾名额，netns 实验室、真实网络编排、实验工具合成「研究实验室 ×3」`lab`（链到 10-modules），23 号图改由模块图的 pcphone 进入。
+
 ## 2026-11-21 · ac3a392+dirty → d578d66
 
 - 先体检、再直传落地（DESIGN 8 步）：总览的 `preflight` 从 planned 转正（锚点 `startPreflight`），26-flow-preflight、33-nat-profile 两张新图在设计阶段已随每步实现转正。模块图新增 `p2p_preflight`（画像 / 预测 / 结果记录 / check -room，链到 26 号图），连到公开 STUN（测映射）和会合服务器（/FT 测过滤）。

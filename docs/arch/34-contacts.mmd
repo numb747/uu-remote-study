@@ -1,0 +1,41 @@
+flowchart LR
+  me["我和朋友"]
+  browser["浏览器"]
+  subgraph clients["客户端（薄壳，启动 p2pcp、读 -progress 的 @ 行）"]
+    android["安卓 App 通讯录模式：好友列表、邀请二维码、粘贴 / 链接加好友、选人发送、前台服务后台接收"]:::planned
+    webui["桌面版 p2pcp app：127.0.0.1 本地网页（HTML 内嵌），通讯录 / 加好友 / 发送 / 记录；同进程跑 serve"]:::planned
+    osint["系统集成 ×3：开机自启（启动文件夹 / LaunchAgent / systemd）、右键发送（发送到 / Dolphin）、通知"]:::planned
+  end
+  subgraph core["lab/p2pcp（Go，四个平台共用）"]
+    cli["新命令：id / invite / join / contacts / send -to / serve；二维码 rsc.io/qr"]:::planned
+    serve["serve：同时听所有好友房间 + 未用的邀请，按好友分目录"]:::planned
+    pair["加好友：邀请码编解码、互换名片、配对密钥 HKDF(ECDH)<br/>contacts.go / pair.go"]:::planned
+    xfer["传文件：体检、打洞、续传、后台升级<br/>sendSession / recvSession"]
+  end
+  identity["设备身份：X25519 私钥 + 设备名<br/>identity.json"]:::planned
+  store["通讯录<br/>contacts.json"]:::planned
+  rdv["会合 + 中继 99-server"]
+  release["发布：GitHub Releases（APK 固定签名、Windows / macOS zip、Linux tar），启动时查新版本"]:::planned
+
+  me -->|"点按钮、选文件"| android
+  me -->|"打开网页"| browser
+  browser -->|"HTTP 127.0.0.1"| webui
+  me -->|"右键发送"| osint
+  osint -->|"启动 p2pcp send -to / app"| cli
+  android -->|"ProcessBuilder，-config 指向 App 目录"| cli
+  webui -->|"同一进程里调用"| cli
+  cli --> pair
+  cli --> serve
+  cli -->|"send -to：配对密钥当房间密钥"| xfer
+  serve -->|"每个房间 recvSession"| xfer
+  pair -->|"读私钥"| identity
+  pair -->|"写好友"| store
+  serve -->|"读好友列表"| store
+  xfer -->|"/R2、中继 /L"| rdv
+  release -.->|"下载安装"| me
+
+%% @src xfer lab/p2pcp/transfer.go func sendSession(
+%% @src rdv lab/punch/main.go func runServer
+%% @link pair 27-flow-pairing.mmd
+%% @link xfer 24-flow-p2pcp.mmd
+classDef planned stroke:#bb9af7,stroke-width:2px,stroke-dasharray:3 4
