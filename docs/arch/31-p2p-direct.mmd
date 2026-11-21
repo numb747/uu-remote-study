@@ -1,9 +1,9 @@
 flowchart LR
   user["用户"]
   subgraph phone["手机 · App dev.uulab.p2p（5G 或 Wi-Fi）"]
-    app_ui["界面：选文件 / 分享 / 进度；换网重启接收<br/>MainActivity"]:::changed
-    app_core["p2pcp 核心（Go）<br/>伪装成 libp2pcp.so 才能执行"]
-    phone_dl["下载/P2P直传<br/>MediaStore"]
+    app_ui["界面：本机名、好友列表、邀请好友（二维码 / 邀请码）、加好友（粘贴 / p2pcp:// 链接）、选好友发送<br/>MainActivity"]:::changed
+    app_core["p2pcp 核心（Go，伪装成 libp2pcp.so 才能执行）：前台服务里常驻 serve（-reg 20s，换网重启），发送时另起 send -to；熄屏后要系统放行后台（vivo：允许后台高耗电）<br/>P2PService / P2p"]:::changed
+    phone_dl["下载/P2P直传/好友名<br/>MediaStore"]
   end
   subgraph cloud["99-server 8.140.18.211"]
     rdv["会合 + 中继 uu-rendezvous：会合 7000 + 7001，中继 3478<br/>会合只交换地址；中继只在打不通时转发（出方向 3M）"]
@@ -11,25 +11,25 @@ flowchart LR
   nat_phone["运营商 CGNAT<br/>手机侧，有 IPv6 时并行打 IPv6"]
   nat_pc["路由器 NAT<br/>电脑侧"]
   subgraph pc["电脑"]
-    pc_entry["发送入口：启动器 / Dolphin 右键<br/>p2p-direct send"]
-    pc_svc["常驻接收：systemd 用户服务<br/>p2p-direct daemon"]
+    pc_entry["发送入口：启动器 / Dolphin 右键，好友不止一个时弹框选；邀请 / 加好友<br/>p2p-direct send / invite / join"]:::changed
+    pc_svc["常驻接收所有好友：systemd 用户服务<br/>p2p-direct serve"]:::changed
     pc_core["p2pcp 核心（Go）<br/>~/.local/bin/p2pcp，-bind auto 每轮取物理网卡 IP"]
-    pc_dl["~/Downloads/P2P直传"]
+    pc_dl["~/Downloads/P2P直传/好友名"]
     notify["桌面通知<br/>notify-send"]
   end
-  room_key["房间密钥 + 会合地址（p2pcp 不再内置服务器地址）<br/>~/.config/p2pcp/room、server（install.sh 写）"]:::changed
+  room_key["设备密钥 + 通讯录 + 会合地址（手机上在 App 私有目录）<br/>~/.config/p2pcp/identity.json、contacts.json、server"]:::changed
 
   user -->|"分享 / 选文件"| app_ui
   user -->|"右键 / 启动器"| pc_entry
-  app_ui -->|"ProcessBuilder：send（选的文件一次全交给它）/ daemon，-lan 本机 IP 含 IPv6；XDG_CACHE_HOME = App 缓存目录（画像缓存、预测记录）"| app_core
-  app_core -.->|"stdout：@STATE / @PROGRESS / @DONE / @CHECK（App 暂不解析）"| app_ui
+  app_ui -->|"ProcessBuilder：send -to 好友（选的文件一次全交给它）/ invite / join / contacts；-config App 私有目录，-lan 本机 IP 含 IPv6"| app_core
+  app_core -.->|"stdout：@STATE / @PROGRESS / @DONE / @PAIRED / @INVITE / @CONTACTS"| app_ui
   app_ui -->|"收完挪进公共下载"| phone_dl
   pc_entry -->|"exec p2pcp send"| pc_core
   pc_svc -->|"exec p2pcp daemon"| pc_core
   pc_core -->|"写 .part，校验 sha256 后改名"| pc_dl
   pc_core -.->|"进度 / 完成"| notify
-  room_key -.->|"p2p-direct 读取，交给 p2pcp 派生房间号和认证密钥"| pc_svc
-  room_key -.->|"build.sh 写进 APK assets"| app_ui
+  room_key -.->|"serve 按好友算出收件房间（配对密钥按方向派生）"| pc_svc
+  room_key -.->|"build.sh 只把会合地址写进 APK，设备密钥手机自己生成"| app_ui
   room_key -.->|"p2pcp 自己读 server（serverConf）"| pc_core
   app_core -->|UDP| nat_phone
   pc_core -->|UDP| nat_pc
@@ -39,10 +39,10 @@ flowchart LR
   nat_phone -.->|"两轮打不通（预测打不通时一轮）：经中继 3478；走中继时 15 秒起后台打洞，通了换直连续传"| rdv
 
 %% @src app_ui apps/android/src/dev/uulab/p2p/MainActivity.java public class MainActivity extends Activity
-%% @src app_core apps/android/src/dev/uulab/p2p/MainActivity.java cmd.add(getApplicationInfo().nativeLibraryDir + "/libp2pcp.so");
+%% @src app_core apps/android/src/dev/uulab/p2p/P2PService.java public class P2PService extends Service
 %% @src rdv lab/punch/main.go func runServer
 %% @src pc_entry apps/pc/p2p-direct send)
-%% @src pc_svc apps/pc/install.sh ExecStart=%h/.local/bin/p2p-direct daemon
+%% @src pc_svc apps/pc/install.sh ExecStart=%h/.local/bin/p2p-direct serve
 %% @src pc_core apps/pc/install.sh -o ~/.local/bin/p2pcp ./p2pcp
 %% @link app_core 24-flow-p2pcp.mmd
 %% @link pc_core 24-flow-p2pcp.mmd

@@ -4,7 +4,7 @@ flowchart LR
     apps["P2P 直传软件 ×2<br/>安卓 App + 电脑常驻服务（换网自动恢复）"]
     p2pcp["打洞直连核心 lab/p2pcp：断点续传 + 端口转发（换网迁移不断线）<br/>双栈打洞 + QUIC（BBR）+ 房间密钥通道绑定认证"]
     rdv["会合 + 中继 8.140.18.211<br/>uu-rendezvous：会合 7000+7001（含 /FT 过滤测试应答），中继 UDP 3478（打不通时兜底）"]:::changed
-    contacts["通讯录（设计中）：设备密钥、邀请码加好友、每对好友一个房间（DH 派生），serve 同时听所有好友<br/>invite / join / send -to / serve"]:::planned
+    contacts["通讯录：设备密钥、邀请码加好友、好友之间的房间由 DH 派生（按方向分收件房间），serve 同时听所有好友<br/>invite / join / send -to / serve"]:::changed
     desk["桌面版 ×3（设计中）：Windows / macOS / Linux，本地网页界面 + 常驻接收 + 右键发送<br/>p2pcp app"]:::planned
     preflight["先体检、再直传：NAT 画像（按网络缓存）+ 双端预测 + 结果记录；走中继时后台升级到直连<br/>startPreflight / predict / settle / check -room / upgrader"]:::changed
   end
@@ -22,7 +22,7 @@ flowchart LR
   lab -->|"UDP 穿过（真实网络）"| real_nat
   researcher -->|"选好友、发文件"| desk
   desk -->|"同进程跑 serve / send -to"| contacts
-  apps -.->|"改成通讯录模式"| contacts
+  apps -->|"send -to / serve / invite / join"| contacts
   contacts -->|"配对密钥当房间密钥交给 connect"| p2pcp
   p2pcp -->|"connect 开始时后台体检；走中继时后台升级"| preflight
   preflight -->|"STUN Binding、/FT 过滤测试（经真实 NAT）"| real_nat
@@ -33,6 +33,7 @@ flowchart LR
 %% @src rdv lab/punch/main.go func runServer
 %% @src lab lab/netns/lab.sh main() {
 %% @src preflight lab/p2pcp/preflight.go func startPreflight(
+%% @src contacts lab/p2pcp/pair.go func serve(o opts)
 %% @link apps 31-p2p-direct.mmd
 %% @link p2pcp 24-flow-p2pcp.mmd
 %% @link lab 10-modules.mmd

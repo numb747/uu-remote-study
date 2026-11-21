@@ -2,7 +2,7 @@ flowchart LR
   me["我和朋友"]
   browser["浏览器"]
   subgraph clients["客户端（薄壳，启动 p2pcp、读 -progress 的 @ 行）"]
-    android["安卓 App 通讯录模式：好友列表、邀请二维码、粘贴 / 链接加好友、选人发送、前台服务后台接收"]:::planned
+    android["安卓 App 通讯录模式：好友列表、邀请二维码、粘贴 / 链接加好友、选人发送；前台服务常驻 serve -reg 20s，熄屏要系统放行后台<br/>MainActivity / P2PService"]
     webui["桌面版 p2pcp app：127.0.0.1 本地网页（HTML 内嵌），通讯录 / 加好友 / 发送 / 记录；同进程跑 serve"]:::planned
     osint["系统集成 ×3：开机自启（启动文件夹 / LaunchAgent / systemd）、右键发送（发送到 / Dolphin）、通知"]:::planned
   end
@@ -35,6 +35,7 @@ flowchart LR
   release -.->|"下载安装"| me
 
 %% @src xfer lab/p2pcp/transfer.go func sendSession(
+%% @src android apps/android/src/dev/uulab/p2p/P2PService.java public class P2PService extends Service
 %% @src cli lab/p2pcp/main.go case "invite":
 %% @src serve lab/p2pcp/pair.go func serve(o opts)
 %% @src pair lab/p2pcp/contacts.go func pairSecret(
