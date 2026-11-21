@@ -63,7 +63,7 @@ func randHex(n int) string {
 //
 // 会合服务器可以给多个地址（-server a,b,c，服务器那边房间共享）：每轮换下一个，某个端口被运营商拦了（docs/09 第 7 节）
 // 也只是多花一轮。哪个地址打通过就记住，下次从它开始。
-func connect(o opts, rid, role string) (*session, error) {
+func connect(o opts, rid, role string) (_ *session, err error) {
 	const attempts = 6
 	if o.stun != "off" && o.stun != "" {
 		o.pre = startPreflight(o, role) // 后台测，不等；传输会话结束时 settle（preflight.go）
@@ -80,10 +80,16 @@ func connect(o opts, rid, role string) (*session, error) {
 		// 配上之后按 id 大小定谁发起（isControlling）
 		id = "chk" + randHex(3) + "." + randHex(4)
 	}
-	var (
-		err      error
-		punchTOs int // 拿到了对方地址、却没打通的轮数
-	)
+	var punchTOs, tried int // 拿到了对方地址、却没打通的轮数；试了几轮
+	// 没连上也要记一条（原因码、过程记录），除了两种：主动叫停的，和常驻接收空等时连不上会合服务器（没人在用，
+	// keepServing 会一直重试，记下来全是噪音）
+	defer func() {
+		idle := role == "recv" && o.timeout == 0 && punchTOs == 0 && !errors.Is(err, errRelay)
+		if err != nil && !errors.Is(err, errStopped) && !idle {
+			o.pre.tracef("放弃：%v", err)
+			o.pre.settle(outcome{actual: "失败", err: err.Error(), reason: reasonOf(err), took: time.Since(start), rounds: tried})
+		}
+	}()
 	for i := range attempts {
 		k := (first + i) % len(servers)
 		// 发送端两轮打不通就请求中继（接收端看到对方的标志会跟着去，打洞中途也会跟）；
@@ -94,6 +100,11 @@ func connect(o opts, rid, role string) (*session, error) {
 			log.Print("体检预测打不通，这一轮直接请求中继")
 		}
 		var s *session
+		tried = i + 1
+		o.pre.tracef("第 %d 轮：会合 %s%s", i+1, servers[k], map[bool]string{true: "，请求中继"}[relay])
+		if i > 0 && role != "recv" {
+			o.rep.state(fmt.Sprintf("正在打洞（第 %d 轮）", i+1))
+		}
 		if s, err = connectOnce(o, servers[k], rid, id, relay); err == nil {
 			s.punch, s.rounds = s.took, i+1 // connectOnce 填的是这一轮的打洞用时
 			s.took = time.Since(start)
@@ -110,10 +121,8 @@ func connect(o opts, rid, role string) (*session, error) {
 		} else if !errors.Is(err, errBadPort) && !errors.Is(err, errLost) && !errors.Is(err, errRelay) {
 			return nil, err // 等不到对方之类的错误，重来也没用
 		}
+		o.pre.tracef("第 %d 轮失败：%v", i+1, err)
 		log.Printf("第 %d 轮失败（会合 %s：%v），换端口重来", i+1, servers[k], err)
-	}
-	if punchTOs > 0 || errors.Is(err, errRelay) {
-		o.pre.settle(outcome{actual: "失败", err: err.Error(), took: time.Since(start), rounds: attempts})
 	}
 	// 按层说清楚坏在哪：昨天能用今天不能用，多半是网络环境变了，先知道是哪一层
 	switch {
@@ -204,6 +213,8 @@ func connectOnce(o opts, server, rid, id string, wantRelay bool) (*session, erro
 	if c6 != nil {
 		cands = strings.TrimSuffix(c6.LocalAddr().String()+","+cands, ",-")
 	}
+	o.pre.tracef("本机 socket %s，自报候选 %s", c.LocalAddr(), cands)
+	waitSaid := strings.HasPrefix(id, "recv.") // 接收端（常驻接收同时听很多房间）不报等待阶段
 	// 每次注册现拼：本机画像在后台测，出来之后的注册才带得上 nat=
 	reg := func() []byte {
 		var fl []string
@@ -216,6 +227,7 @@ func connectOnce(o opts, server, rid, id string, wantRelay bool) (*session, erro
 		if f := o.pre.flag(); f != "" {
 			fl = append(fl, f)
 		}
+		fl = append(fl, "v="+version) // 版本：对方记进结果记录，服务器日志里也看得到（旧版忽略不认识的标志）
 		flags := "-"
 		if len(fl) > 0 {
 			flags = strings.Join(fl, ",")
@@ -278,6 +290,10 @@ func connectOnce(o opts, server, rid, id string, wantRelay bool) (*session, erro
 			return nil, errStopped
 		default:
 		}
+		if !waitSaid && mapped != nil && time.Since(start) > 1500*time.Millisecond {
+			waitSaid = true
+			o.rep.state("正在等对方上线")
+		}
 		if o.timeout > 0 && time.Since(start) > o.timeout {
 			unreg()
 			closeAll()
@@ -311,7 +327,9 @@ func connectOnce(o opts, server, rid, id string, wantRelay bool) (*session, erro
 				if mapped != nil {
 					continue
 				}
-				if mapped, _ = net.ResolveUDPAddr("udp4", f[1]); mapped != nil && mapped.Port < 1024 {
+				mapped, _ = net.ResolveUDPAddr("udp4", f[1])
+				o.pre.tracef("会合回执：本方公网映射 %s（%v）", f[1], time.Since(start).Round(time.Millisecond))
+				if mapped != nil && mapped.Port < 1024 {
 					unreg()
 					closeAll()
 					return nil, fmt.Errorf("%w：映射到了低端口 %s", errBadPort, mapped)
@@ -322,6 +340,8 @@ func connectOnce(o opts, server, rid, id string, wantRelay bool) (*session, erro
 				continue
 			}
 			peerID = f[1]
+			o.pre.setConn(connHash(id, peerID))
+			o.pre.tracef("对方 %s 上线：公网映射 %s，自报候选 %s，标志 %s", f[1], f[2], f[3], f[4])
 			useRelay = useRelay || slices.Contains(strings.Split(f[4], ","), "relay")
 			o.pre.sawPeer(f[4])
 			peerCands = parseCands(f[2], f[3])
@@ -347,12 +367,17 @@ func connectOnce(o opts, server, rid, id string, wantRelay bool) (*session, erro
 			dialer = peerID
 		}
 		relay := &net.UDPAddr{IP: srv.IP, Port: relayPort}
+		o.pre.tracef("%s，去中继 %s 报到", why, relay)
+		if !strings.HasPrefix(id, "recv.") {
+			o.rep.state("打不通，改走中继")
+		}
 		t0 := time.Now()
 		keep := func() { c.WriteToUDP(reg(), srv) }
 		if err := joinRelay(c, relay, rid+"."+dialer, map[bool]string{true: "d", false: "l"}[controlling], keep); err != nil {
 			c.Close()
 			return nil, err
 		}
+		o.pre.tracef("中继凑齐（%v）", time.Since(t0).Round(time.Millisecond))
 		log.Printf("%s，改走中继 %s（%v）", why, relay, time.Since(t0).Round(time.Millisecond))
 		return &session{conn: c, peer: relay, server: srv, relayed: true, took: time.Since(t0), control: controlling}, nil
 	}
@@ -364,6 +389,7 @@ func connectOnce(o opts, server, rid, id string, wantRelay bool) (*session, erro
 		closeAll()
 		return nil, errors.New("没有能用的对方候选（-6 时两端都要有全局 IPv6）")
 	}
+	o.pre.tracef("开始打洞，对方候选 %v，本端%s发起方", peerCands, map[bool]string{true: "是", false: "不是"}[controlling])
 
 	// 2. 打洞：每 20ms 向所有候选发探测；收到对方探测立即回应并"触发检查"；收到回应就打通了。
 	//
@@ -390,6 +416,7 @@ func connectOnce(o opts, server, rid, id string, wantRelay bool) (*session, erro
 		if !slices.ContainsFunc(peerCands, func(b *net.UDPAddr) bool { return sameAddr(a, b) }) &&
 			!slices.ContainsFunc(learned, func(b *net.UDPAddr) bool { return sameAddr(a, b) }) {
 			learned = append(learned, a)
+			o.pre.tracef("学到对方的新地址 %s", a)
 		}
 	}
 	choose := func(c *net.UDPConn, from *net.UDPAddr) {
@@ -413,6 +440,11 @@ func connectOnce(o opts, server, rid, id string, wantRelay bool) (*session, erro
 			if os.Getenv("P2PCP_DEBUG") != "" {
 				log.Printf("收到 %q 来自 %s", buf[:min(n, 16)], from)
 			}
+			kind := string(buf[:min(n, 3)])
+			if kind != "/P " && kind != msgPunch && kind != msgAck && kind != msgNom {
+				kind = fmt.Sprintf("其他（%d 字节，首字节 %#02x）", n, buf[0])
+			}
+			o.pre.tracePkt(strings.TrimSpace(kind), from)
 			switch string(buf[:min(n, 3)]) {
 			case "/P ": // 服务器重推的对方信息（双方打洞期间每 500ms 注册一次，每次都推）
 				if from.IP.Equal(srv.IP) && from.Port == srv.Port {
@@ -511,6 +543,7 @@ func connectOnce(o opts, server, rid, id string, wantRelay bool) (*session, erro
 		}
 		select {
 		case <-done:
+			o.pre.tracef("打通：对方 %s（本机 %s），打洞 %v", chosen, chosenOn.LocalAddr(), time.Since(punchStart).Round(time.Millisecond))
 			unreg()
 			if controlling {
 				for range 3 {

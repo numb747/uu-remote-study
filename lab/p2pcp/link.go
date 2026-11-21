@@ -242,7 +242,7 @@ func (l *link) dial() (*quic.Conn, error) {
 	defer cancel()
 	conn, err := l.tr.Dial(ctx, l.peer, &tls.Config{InsecureSkipVerify: true, NextProtos: []string{l.alpn}}, quicConf(l.alpn))
 	if err != nil {
-		return nil, fmt.Errorf("连上 %s 后 QUIC 握手: %w", l.via(), err)
+		return nil, withReason(rsnLost, fmt.Errorf("连上 %s 后 QUIC 握手: %w", l.via(), err))
 	}
 	if err := authConn(conn, l.secret, true); err != nil {
 		conn.CloseWithError(0, "")
@@ -262,7 +262,7 @@ func (l *link) accept(timeout time.Duration) (*quic.Conn, error) {
 	}
 	conn, err := l.ln.Accept(ctx)
 	if err != nil {
-		return nil, fmt.Errorf("连上 %s 后等 QUIC 连接: %w", l.via(), err)
+		return nil, withReason(rsnLost, fmt.Errorf("连上 %s 后等 QUIC 连接: %w", l.via(), err))
 	}
 	if err := authConn(conn, l.secret, false); err != nil {
 		conn.CloseWithError(0, "")
@@ -293,10 +293,11 @@ func dialPeer(o opts, alpn string) (*link, error) {
 	l := newLink(s, secret, alpn)
 	t0 := time.Now()
 	if l.conn, err = l.dial(); err != nil {
-		l.close()
+		l.failed(err)
 		return nil, err
 	}
 	l.handshake = time.Since(t0)
+	l.pre.tracef("QUIC 握手 + 认证 %v", l.handshake.Round(time.Millisecond))
 	return l, nil
 }
 
@@ -319,11 +320,21 @@ func acceptPeer(o opts, alpn string) (*link, error) {
 	l.onClose(func() { l.ln.Close() })
 	t0 := time.Now()
 	if l.conn, err = l.accept(15 * time.Second); err != nil {
-		l.close()
+		l.failed(err)
 		return nil, err
 	}
 	l.handshake = time.Since(t0)
+	l.pre.tracef("QUIC 握手 + 认证 %v", l.handshake.Round(time.Millisecond))
 	return l, nil
+}
+
+// failed：打通了，但 QUIC 握手或认证没过。也记一条（原因码、过程记录），再关掉
+func (l *link) failed(err error) {
+	out := l.outcome()
+	out.err, out.reason = err.Error(), reasonOf(err)
+	l.pre.tracef("QUIC 握手 / 认证失败：%v", err)
+	l.pre.settle(out)
+	l.close()
 }
 
 func statsLine(c *quic.Conn) string {

@@ -14,6 +14,7 @@ import (
 //	@STATE <文字>
 //	@PROGRESS <方向 send|recv> <已传字节> <总字节> <当前 Mbps> <文件名>
 //	@DONE <方向> <字节> <秒> <平均 Mbps> <路径或文件名>
+//	@REASON <原因码> <人话>。<动作>     紧跟着一行 @ERROR（reason.go；旧版 App 不认识，忽略）
 //	@ERROR <文字>
 type reporter struct {
 	machine bool
@@ -67,9 +68,15 @@ func (r *reporter) done(dir string, size, sent uint64, el time.Duration, path st
 }
 
 func (r *reporter) fail(err error) {
-	log.Print(err)
+	code := reasonOf(err)
+	if code == "" {
+		code = rsnUnknown
+	}
+	log.Printf("%v（%s）", err, code)
+	r.line("@REASON %s", reasonLine(code))
 	r.line("@ERROR %s", strings.ReplaceAll(err.Error(), "\n", " "))
-	r.desktop("P2P 直传失败", err.Error(), -1)
+	t := reasonText[code]
+	r.desktop("P2P 直传失败："+t[0], t[1]+"\n\n"+err.Error(), -1)
 	r.mu.Lock()
 	r.nid = ""
 	r.mu.Unlock()

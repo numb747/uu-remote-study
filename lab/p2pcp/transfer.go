@@ -48,6 +48,8 @@ type ctlMsg struct {
 	Err    string      `json:"err,omitempty"`
 }
 
+var errNotRegular = errors.New("不是普通文件")
+
 // interrupted：打通之后才出的错，重连续传有意义
 type interrupted struct{ error }
 
@@ -97,10 +99,13 @@ func (c countingReader) Read(p []byte) (int, error) {
 // send 发一组文件。打通之后断了就重连续传；连续 5 次重连都没有任何进展才放弃
 func send(o opts, paths []string) error {
 	for _, p := range paths {
+		noteFile(p) // 诊断报告里打码用（diag.go）；出错的日志里也有文件名，所以最先登记
+	}
+	for _, p := range paths {
 		if fi, err := os.Stat(p); err != nil {
 			return err
 		} else if !fi.Mode().IsRegular() {
-			return fmt.Errorf("%s 不是普通文件", p)
+			return fmt.Errorf("%s %w", p, errNotRegular)
 		}
 	}
 	files := append([]string(nil), paths...)
@@ -158,6 +163,10 @@ func sendSession(o opts, files *[]string, l *link) (progressed bool, up *link, e
 		// defer 后进先出，在 close 之前跑：体检的结论在传输结束时补齐（preflight.go）
 		out := l.outcome()
 		u.annotate(&out)
+		if err != nil && up == nil { // 切到了直连（up）不算出错
+			out.err, out.reason = err.Error(), reasonOf(err)
+			l.pre.tracef("会话出错：%v", err)
+		}
 		l.pre.settle(out)
 	}()
 	defer func() {
@@ -538,6 +547,9 @@ func recvOne(o opts, l *link) (next *link, err error) {
 		out := l.outcome()
 		if next != nil {
 			out.upgraded, out.upgradedVia = time.Since(t0), next.peer.String()
+		} else if err != nil {
+			out.err, out.reason = err.Error(), reasonOf(err)
+			l.pre.tracef("会话出错：%v", err)
 		}
 		l.pre.settle(out)
 	}()
@@ -586,13 +598,13 @@ func serveLink(o opts, l *link) error {
 	ctl, err := l.conn.AcceptStream(ctx)
 	cancel()
 	if err != nil {
-		return fmt.Errorf("等对方的控制流: %w", err)
+		return interrupted{fmt.Errorf("等对方的控制流: %w", err)}
 	}
 	enc, dec := json.NewEncoder(ctl), json.NewDecoder(ctl)
 	for {
 		var m ctlMsg
 		if err := dec.Decode(&m); err != nil {
-			return fmt.Errorf("连接断了（%w），对方重连后会续传", err)
+			return interrupted{fmt.Errorf("连接断了（%w），对方重连后会续传", err)}
 		}
 		switch m.T {
 		case "bye":
@@ -607,10 +619,12 @@ func serveLink(o opts, l *link) error {
 
 func recvFile(o opts, l *link, offer ctlMsg, cur *atomic.Pointer[inFile], enc *json.Encoder, dec *json.Decoder) error {
 	name := filepath.Base(offer.Name) // 不信任对方给的路径
+	noteName("f", offer.Name)         // 不合法的名字也会进错误文字：先登记，诊断报告、上报里才能打码
 	if name == "." || name == ".." || name == "/" || strings.HasPrefix(name, ".p2pcp-") || len(offer.FID) != 32 || strings.Trim(offer.FID, "0123456789abcdef") != "" {
 		enc.Encode(ctlMsg{T: "bad", Err: "文件名或指纹不合法"})
 		return fmt.Errorf("对方发来的文件名或指纹不合法：%q %q", offer.Name, offer.FID)
 	}
+	noteName("f", name)
 	defer lockFID(offer.FID)()
 
 	if err := os.MkdirAll(o.out, 0o755); err != nil {
@@ -664,14 +678,14 @@ func recvFile(o opts, l *link, offer ctlMsg, cur *atomic.Pointer[inFile], enc *j
 	var end ctlMsg
 	if err := dec.Decode(&end); err != nil || end.T != "end" {
 		f.save()
-		return fmt.Errorf("%s 传到 %.1f / %.1fMB 时连接断了（%v），对方重连后会续传", name, float64(f.m.n.Load())/1e6, float64(f.size)/1e6, err)
+		return interrupted{fmt.Errorf("%s 传到 %.1f / %.1fMB 时连接断了（%v），对方重连后会续传", name, float64(f.m.n.Load())/1e6, float64(f.size)/1e6, err)}
 	}
 	for !f.complete() {
 		select {
 		case <-f.changed:
 		case <-l.conn.Context().Done():
 			f.save()
-			return fmt.Errorf("%s 没收齐连接就断了，对方重连后会续传", name)
+			return interrupted{fmt.Errorf("%s 没收齐连接就断了，对方重连后会续传", name)}
 		}
 	}
 	stop()
@@ -695,6 +709,7 @@ func recvFile(o opts, l *link, offer ctlMsg, cur *atomic.Pointer[inFile], enc *j
 		return fmt.Errorf("%s 的 sha256 对不上（收到 %s，应为 %s），已删除，重发一次", name, got[:12], end.SHA256[:min(12, len(end.SHA256))])
 	}
 	out := uniquePath(o.out, name)
+	noteFile(out) // 诊断报告里打码用（diag.go）
 	if err := os.Rename(f.part, out); err != nil {
 		return err
 	}

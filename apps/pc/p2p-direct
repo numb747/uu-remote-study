@@ -7,6 +7,8 @@
 #   p2p-direct invite          生成邀请码：复制到剪贴板、打开二维码图片，发给朋友或让他扫
 #   p2p-direct join <邀请码>   用朋友给的邀请码加好友
 #   p2p-direct contacts [...]  好友列表（rm 名字 / rename 旧名 新名）
+#   p2p-direct report          生成诊断报告（打不通、收不到时用），存到 ~/Downloads/P2P直传/，打开所在目录，发给我
+#   p2p-direct upload on|off   诊断数据上报（默认开：每次连接结束把结果发给会合服务器，不含文件名、好友名、密钥）
 #
 # 进度和结果都走桌面通知。
 set -euo pipefail
@@ -61,8 +63,24 @@ contacts)
 	shift
 	exec "$BIN" contacts "$@"
 	;;
+report)
+	mkdir -p ~/Downloads/P2P直传
+	out=~/Downloads/P2P直传/P2P直传诊断报告-$(date +%Y%m%d-%H%M%S).txt
+	note "正在生成诊断报告" "要现测一次网络，十几秒"
+	"$BIN" report "${SRV[@]}" -bind auto "$out" >/dev/null
+	echo "$out"
+	note "诊断报告已生成" "$out"
+	xdg-open "$(dirname "$out")" >/dev/null 2>&1 &
+	;;
+upload)
+	shift
+	case "${1:-}" in
+	on | off) "$BIN" id -upload "$1" >/dev/null ;;
+	*) echo "用法：p2p-direct upload on|off"; exit 2 ;;
+	esac
+	;;
 *)
-	sed -n '2,10p' "$0"
+	sed -n '2,12p' "$0"
 	exit 2
 	;;
 esac

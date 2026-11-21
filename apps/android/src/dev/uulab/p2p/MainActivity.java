@@ -4,6 +4,7 @@ import android.app.Activity;
 import android.app.AlertDialog;
 import android.content.ClipData;
 import android.content.ClipboardManager;
+import android.content.ContentValues;
 import android.content.Intent;
 import android.content.pm.PackageManager;
 import android.database.Cursor;
@@ -13,9 +14,11 @@ import android.graphics.drawable.GradientDrawable;
 import android.net.Uri;
 import android.os.Build;
 import android.os.Bundle;
+import android.os.Environment;
 import android.os.Handler;
 import android.os.Looper;
 import android.os.PowerManager;
+import android.provider.MediaStore;
 import android.provider.OpenableColumns;
 import android.provider.Settings;
 import android.view.Gravity;
@@ -47,6 +50,8 @@ import java.util.function.Consumer;
  *           或者用系统相机扫码直接跳进来（p2pcp://join/…）。两边互相加上之后，选好友就能发
  *   发送：选好友 → 选文件（或在相册里「分享 → P2P 直传」）→ 复制到缓存目录 → p2pcp send -to 好友
  *   接收：后台服务 P2PService 常驻 p2pcp serve，收完挪进「下载/P2P直传/好友名」
+ *   诊断：失败时显示原因码对应的人话和动作（@REASON），「生成诊断报告」（p2pcp report）存进「下载/P2P直传」再分享；
+ *         诊断数据上报默认开，第一次打开时说明传了什么，底下可以关（p2pcp -upload on|off，记在 settings.json）
  */
 public class MainActivity extends Activity {
     // Tokyo Night
@@ -55,7 +60,7 @@ public class MainActivity extends Activity {
 
     final Handler ui = new Handler(Looper.getMainLooper());
     Panel sendPanel, recvPanel;
-    TextView logView, meView;
+    TextView logView, meView, uploadView;
     LinearLayout friendsBox;
     final List<String> friends = new ArrayList<>();
     String pendingFriend; // 选文件之前选好的好友
@@ -66,6 +71,7 @@ public class MainActivity extends Activity {
         TextView state, detail;
         ProgressBar bar;
         boolean justDone; // 刚显示完成：serve 紧接着报的「等待好友发送」不要盖掉它
+        String[] reason;  // 紧跟着 @ERROR 的那条 @REASON：{原因码, 人话, 动作}
 
         Panel(LinearLayout parent, String title) {
             LinearLayout card = card(parent);
@@ -108,10 +114,32 @@ public class MainActivity extends Activity {
                     justDone = true;
                     break;
                 }
-                case "@ERROR":
-                    state.setText("失败：" + line.substring(7));
-                    state.setTextColor(RED);
+                case "@REASON": { // @REASON <码> <人话>。<动作>
+                    String[] r = line.split(" ", 3);
+                    if (r.length < 3) break;
+                    int dot = r[2].indexOf('。');
+                    reason = dot < 0 ? new String[]{r[1], r[2], ""} : new String[]{r[1], r[2].substring(0, dot), r[2].substring(dot + 1)};
                     break;
+                }
+                case "@ERROR": {
+                    String err = line.length() > 7 ? line.substring(7) : "";
+                    state.setTextColor(RED);
+                    detail.setOnClickListener(null);
+                    if (reason == null) { // 旧版 p2pcp，或者 App 自己报的错
+                        state.setText("失败：" + err);
+                        break;
+                    }
+                    String[] r = reason;
+                    reason = null;
+                    state.setText("失败：" + r[1]);
+                    detail.setText(r[2] + "\n点这里看详情");
+                    detail.setOnClickListener(v -> new AlertDialog.Builder(MainActivity.this)
+                            .setTitle(r[1])
+                            .setMessage(err + "\n\n原因码 " + r[0] + "\n\n还是不行的话，点下面的「生成诊断报告」发给我。")
+                            .setPositiveButton("知道了", null)
+                            .show());
+                    break;
+                }
             }
         }
     }
@@ -164,6 +192,18 @@ public class MainActivity extends Activity {
         logView.setTypeface(Typeface.MONOSPACE);
         root.addView(logView);
 
+        LinearLayout dc = card(root);
+        dc.addView(text("诊断", 13, DIM, true));
+        TextView report = text("生成诊断报告（打不通、收不到时用：现测一次网络，加上最近的连接记录和日志，好友名、文件名换成代号，可以直接发微信）", 14, BLUE, false);
+        report.setPadding(0, dp(8), 0, dp(8));
+        report.setOnClickListener(v -> makeReport());
+        dc.addView(report);
+        uploadView = text("诊断数据上报：…", 14, FG, false);
+        uploadView.setPadding(0, dp(8), 0, dp(4));
+        uploadView.setOnClickListener(v -> toggleUpload());
+        dc.addView(uploadView);
+        refreshUpload();
+
         TextView stop = text("停止后台接收并退出", 13, DIM, false);
         stop.setPadding(0, dp(18), 0, 0);
         stop.setOnClickListener(v -> {
@@ -181,6 +221,7 @@ public class MainActivity extends Activity {
             requestPermissions(new String[]{"android.permission.POST_NOTIFICATIONS"}, 2);
         }
         askIgnoreBattery();
+        uploadNotice();
         P2PService.listener = this::onService;
         new Thread(() -> {
             ensureName();
@@ -218,6 +259,8 @@ public class MainActivity extends Activity {
         post(() -> {
             if (l.startsWith("#")) {
                 appendLog(l.substring(1));
+            } else if (l.startsWith("@CRASH ")) {
+                appendLog("后台接收上次崩溃了，现场会放进诊断报告");
             } else if (l.startsWith("@PAIRED ")) {
                 toast("加上新好友了");
                 if (inviteDlg != null) inviteDlg.dismiss();
@@ -393,6 +436,86 @@ public class MainActivity extends Activity {
             refreshMe();
             toast2("改好了；已经加了的好友那边显示的还是旧名字，他们可以长按改名");
         }));
+    }
+
+    // ---------------- 诊断 ----------------
+
+    /** 诊断报告：p2pcp report 写在缓存目录，复制进「下载/P2P直传」（MediaStore 的 Uri 可以直接分享，不用 FileProvider） */
+    void makeReport() {
+        toast("正在生成诊断报告，要现测一次网络，十几秒……");
+        bg(() -> {
+            String[] path = {null};
+            P2p.run(this, l -> {
+                if (l.startsWith("@REPORT ")) path[0] = l.substring(8);
+            }, this::log, "report");
+            if (path[0] == null) {
+                post(() -> toast("生成失败，看日志"));
+                return;
+            }
+            File f = new File(path[0]);
+            Uri u = null;
+            try {
+                ContentValues v = new ContentValues();
+                v.put(MediaStore.Downloads.DISPLAY_NAME, "P2P直传诊断报告-" + f.getName().replaceFirst("^report-", ""));
+                v.put(MediaStore.Downloads.MIME_TYPE, "text/plain");
+                v.put(MediaStore.Downloads.RELATIVE_PATH, Environment.DIRECTORY_DOWNLOADS + "/P2P直传");
+                u = getContentResolver().insert(MediaStore.Downloads.EXTERNAL_CONTENT_URI, v);
+                try (InputStream is = new java.io.FileInputStream(f); OutputStream os = getContentResolver().openOutputStream(u)) {
+                    byte[] buf = new byte[1 << 16];
+                    int n;
+                    while ((n = is.read(buf)) > 0) os.write(buf, 0, n);
+                }
+            } catch (Exception e) {
+                log("保存诊断报告失败：" + e.getMessage());
+                post(() -> toast("保存诊断报告失败，看日志"));
+                return;
+            }
+            Uri share = u;
+            post(() -> {
+                toast2("诊断报告已存到「下载/P2P直传」");
+                Intent s = new Intent(Intent.ACTION_SEND).setType("text/plain").putExtra(Intent.EXTRA_STREAM, share)
+                        .addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION);
+                startActivity(Intent.createChooser(s, "发送诊断报告"));
+            });
+        });
+    }
+
+    /** 上报开关存在 p2pcp 的 settings.json（{"upload": false}），没有这个字段 = 默认开 */
+    boolean uploadOn() {
+        try {
+            byte[] b = java.nio.file.Files.readAllBytes(new File(P2p.configDir(this), "settings.json").toPath());
+            return new JSONObject(new String(b, java.nio.charset.StandardCharsets.UTF_8)).optBoolean("upload", true);
+        } catch (Exception e) {
+            return true;
+        }
+    }
+
+    void refreshUpload() {
+        boolean on = uploadOn();
+        uploadView.setText("诊断数据上报：" + (on ? "开（点这里关掉）" : "关（点这里打开）"));
+    }
+
+    void toggleUpload() {
+        boolean on = uploadOn();
+        bg(() -> {
+            P2p.run(this, l -> {
+            }, this::log, "id", "-upload", on ? "off" : "on");
+            post(this::refreshUpload);
+        });
+    }
+
+    /** 第一次打开：一句话说清上报了什么（DESIGN 决策 22） */
+    void uploadNotice() {
+        android.content.SharedPreferences sp = getSharedPreferences("p2p", MODE_PRIVATE);
+        if (sp.getBoolean("uploadNotice", false)) return;
+        sp.edit().putBoolean("uploadNotice", true).apply();
+        new AlertDialog.Builder(this)
+                .setTitle("诊断数据上报")
+                .setMessage("每次连接结束后，P2P 直传会把这次连接的结果发给会合服务器，用来改进打洞：两边的网络类型和公网 IP、"
+                        + "有没有直连、用了多久、失败原因。不含文件名、好友名和任何密钥。\n\n可以随时在最下面「诊断」里关掉。")
+                .setPositiveButton("知道了", null)
+                .setNegativeButton("关掉上报", (d, w) -> toggleUpload())
+                .show();
     }
 
     // ---------------- 发送 ----------------

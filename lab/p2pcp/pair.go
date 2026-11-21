@@ -160,6 +160,7 @@ func cmdJoin(o opts, text string) error {
 }
 
 func reportPaired(o opts, name string, pub []byte) {
+	noteName("p", name)
 	o.rep.state(fmt.Sprintf("已加好友「%s」（设备 ID %s）", name, deviceID(pub)))
 	o.rep.desktop("P2P 直传：新好友", fmt.Sprintf("已加好友「%s」", name), -1)
 	b, _ := json.Marshal(map[string]string{"name": name, "id": deviceID(pub)})
@@ -316,6 +317,7 @@ func resolveFriend(o *opts, role string) error {
 		o.server = c.Server
 	}
 	o.friend = c.Name
+	noteName("p", c.Name) // 诊断报告里打码用（diag.go）
 	return nil
 }
 
@@ -383,6 +385,7 @@ func serve(o opts) error {
 // serveFriend 在和一个好友的配对房间里常驻接收，收到的文件放 <保存目录>/<好友名>/
 func serveFriend(o opts, c contact, secret []byte, quit chan struct{}) {
 	o.secret, o.server, o.quit, o.friend = secret, c.Server, quit, c.Name
+	noteName("p", c.Name)
 	o.out = filepath.Join(o.out, cleanName(c.Name))
 	cleanStale(o.out)
 	keepServing(o, "", func(o opts) (*link, error) { return acceptPeer(o, alpn) }, func(l *link) {

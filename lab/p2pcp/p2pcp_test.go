@@ -492,7 +492,10 @@ func TestSettleHistory(t *testing.T) {
 	}
 	want := histRec{Role: "send", Me: histProfile{Class: natSym, Mapped: "1.2.3.4:5"}, Peer: histProfile{Class: natPort, V6: true},
 		Predict: predNo, Actual: "直连", Wrong: true, Via: "5.6.7.8:9", Rounds: 1, TookMs: 120, PunchMs: 80, HandshakeMs: 4400}
-	rec.At, rec.Why = time.Time{}, ""
+	if rec.Ver != version || rec.OS == "" {
+		t.Fatalf("没带版本和系统：%+v", rec)
+	}
+	rec.At, rec.Why, rec.Ver, rec.OS = time.Time{}, "", "", ""
 	if !reflect.DeepEqual(rec, want) {
 		t.Fatalf("记录不对：\n得到 %+v\n要   %+v", rec, want)
 	}

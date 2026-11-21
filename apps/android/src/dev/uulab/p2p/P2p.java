@@ -57,6 +57,8 @@ final class P2p {
         // 体检的画像缓存和预测记录放 App 的缓存目录：App 进程没有可用的 HOME，不给就每次现测画像，
         // 当发送端时对方总拿不到它的画像（打洞比现测画像快，lab/p2pcp/preflight.go）
         pb.environment().put("XDG_CACHE_HOME", c.getCacheDir().getPath());
+        // Go 不认安卓的系统时区（默认 UTC）：传过去，日志、诊断报告里的时间和电脑那边对得上（p2pcp 嵌入了 time/tzdata）
+        pb.environment().put("TZ", java.util.TimeZone.getDefault().getID());
         return pb.start();
     }
 

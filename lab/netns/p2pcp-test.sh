@@ -15,16 +15,20 @@
 #   xferblock 同上，但前 20 秒直连被封：第一次升级失败，下一次（约 50 秒）才升级成功（接收端 daemon）
 #   preflight 体检：两端的画像（按 $NAT_A / $NAT_B 核对类别）和组合预测，再传一个小文件
 #   checkpair 两端同时 p2pcp check -room：报告里的预测、实测、往返、中继、结论要和 NAT 组合对得上
+#   diag     造出各类失败，看原因码（@REASON）、结果记录和诊断上报：发不存在的文件 → local_error，对方不在 → peer_offline，
+#            传到一半发送端退出 → 接收端 conn_lost，封掉两个 NAT 之间的 UDP → punch_blocked（-relay off）/ 再封中继 → relay_failed，
+#            封会合端口 → rdv_unreachable（上报进本机队列，放开后下一次连接补发）；最后汇总服务器收到的上报（report-stats.py）
 #   desync   人为让两端的打洞轮次错开（B 晚 1.5 秒拿到 /P，前 4.5 秒 A→B 直连全丢）：B 应从重推的 /P 学到 A 的新地址，
 #            或者看到 A 的 relay 标志中途跟进中继，而不是各打满各的一轮（放在 preflight 之后跑，要用它留下的画像缓存）
 #
 # 宇宙里：peerA 10.0.1.2（NAT A 后）发送 / forward，peerB 10.0.2.2（NAT B 后）接收 / expose，会合服务器 192.0.2.1。
 set -uo pipefail
 B=$BIN_DIR
+HERE=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 W=$(mktemp -d /tmp/p2pcp-test.XXXX)
 SRV=192.0.2.1:7001,192.0.2.1:7000
 ROOM=lab-$RANDOM-$RANDOM
-TESTS=${TESTS:-preflight desync checkpair send resume reconn tunnel upgrade xferup xferblock pair}
+TESTS=${TESTS:-preflight desync checkpair send resume reconn tunnel upgrade xferup xferblock pair diag}
 A() { ip netns exec peerA "$@"; }
 Bn() { ip netns exec peerB "$@"; }
 # 后台跑：$! 就是 p2pcp 进程本身（ip netns exec 会 exec 过去），kill 得到
@@ -34,7 +38,7 @@ pass=0 fail=0
 ok() { echo "  ✅ $*"; pass=$((pass + 1)); }
 bad() { echo "  ❌ $*"; fail=$((fail + 1)); }
 
-ip netns exec inet "$B/punch" server -listen 192.0.2.1:7000,192.0.2.1:7001 -relay 192.0.2.1:3478 >"$W/server.log" 2>&1 &
+ip netns exec inet "$B/punch" server -listen 192.0.2.1:7000,192.0.2.1:7001 -relay 192.0.2.1:3478 -reports "$W/reports.jsonl" >"$W/server.log" 2>&1 &
 # 收尾：不管哪一步出错，后台进程都杀掉
 trap 'kill $(jobs -p) 2>/dev/null' EXIT
 SRVPID=$!
@@ -430,6 +434,106 @@ t_pair() {
 	fi
 	kill $sa $sb 2>/dev/null
 	wait $sa $sb 2>/dev/null
+}
+
+# 原因码（DESIGN 决策 23）：<说明> <原因码> <-progress 的输出>
+want_reason() {
+	grep -q "^@REASON $2 " "$3" && ok "$1 → $2「$(grep -o "^@REASON $2 [^。]*" "$3" | head -1 | cut -d' ' -f3-)」" ||
+		bad "$1 应为 $2：$(grep '^@REASON\|^@ERROR' "$3" | tr '\n' '|' | cut -c1-200)"
+}
+# 在 inet 上封：p2p = 两个 NAT 之间的 UDP（不碰会合服务器，它在 inet 本机），relay = 中继端口
+diag_block() {
+	ip netns exec inet nft add table ip dblk
+	ip netns exec inet nft add chain ip dblk fw '{ type filter hook forward priority -10; }'
+	ip netns exec inet nft add chain ip dblk in '{ type filter hook input priority -10; }'
+	for x in "$@"; do
+		case $x in
+		p2p) ip netns exec inet nft add rule ip dblk fw meta l4proto udp drop ;;
+		relay) ip netns exec inet nft add rule ip dblk in udp dport 3478 drop ;;
+		rdv) ip netns exec inet nft add rule ip dblk in ip saddr 203.0.113.1 udp dport '{ 7000, 7001 }' drop ;;
+		esac
+	done
+}
+diag_unblock() { ip netns exec inet nft delete table ip dblk; }
+
+t_diag() {
+	echo "== diag：各类失败的原因码、结果记录、诊断上报（natA=$NAT_A natB=$NAT_B）"
+	local P="$B/p2pcp" hist=$XDG_CACHE_HOME/p2pcp/history.jsonl R=$W/reports.jsonl r s n0
+	echo hi >"$W/d.txt"
+	head -c 30000000 /dev/urandom >"$W/d.bin"
+	A "$P" send -server "$SRV" -room "$ROOM.d1" -progress "$W/没有这个文件.txt" >"$W/diag-local.log" 2>&1
+	want_reason "发不存在的文件" local_error "$W/diag-local.log"
+
+	A "$P" send -server "$SRV" -room "$ROOM.d2" -timeout 4s -progress "$W/d.txt" >"$W/diag-offline.log" 2>&1
+	want_reason "对方没开" peer_offline "$W/diag-offline.log"
+	grep -q '^@STATE 正在等对方上线' "$W/diag-offline.log" && ok "等的时候报了「正在等对方上线」" || bad "没报等待阶段"
+
+	# 传到一半发送端退出（SIGTERM 会主动关连接）：接收端立刻知道，conn_lost
+	bgB "$P" recv -server "$SRV" -room "$ROOM.d3" -o "$W/dout" -progress >"$W/diag-lost-recv.log" 2>&1
+	r=$!
+	sleep 0.5
+	bgA "$P" send -server "$SRV" -room "$ROOM.d3" -conns 1 -cc brutal:20M "$W/d.bin" >"$W/diag-lost-send.log" 2>&1
+	s=$!
+	# 等接收端真的开始收了再杀（走中继的组合要先打一两轮洞），最多 40 秒
+	for _ in $(seq 80); do grep -q '^@PROGRESS recv' "$W/diag-lost-recv.log" && break; sleep 0.5; done
+	sleep 1
+	kill -TERM $s
+	wait $r
+	want_reason "传到一半发送端退出，接收端" conn_lost "$W/diag-lost-recv.log"
+
+	diag_block p2p
+	bgB "$P" recv -server "$SRV" -room "$ROOM.d4" -o "$W/dout" -timeout 60s -relay off >"$W/diag-punch-recv.log" 2>&1
+	r=$!
+	A "$P" send -server "$SRV" -room "$ROOM.d4" -relay off -progress "$W/d.txt" >"$W/diag-punch.log" 2>&1
+	kill $r 2>/dev/null
+	want_reason "两个 NAT 之间的 UDP 被封、不许中继" punch_blocked "$W/diag-punch.log"
+	diag_unblock
+
+	diag_block p2p relay
+	bgB "$P" recv -server "$SRV" -room "$ROOM.d5" -o "$W/dout" -timeout 90s >"$W/diag-relay-recv.log" 2>&1
+	r=$!
+	A "$P" send -server "$SRV" -room "$ROOM.d5" -progress "$W/d.txt" >"$W/diag-relay.log" 2>&1
+	kill $r 2>/dev/null
+	want_reason "直连和中继都被封" relay_failed "$W/diag-relay.log"
+	grep -q '^@STATE 打不通，改走中继' "$W/diag-relay.log" && grep -q '^@STATE 正在打洞（第 2 轮）' "$W/diag-relay.log" &&
+		ok "报了「正在打洞（第 2 轮）」「打不通，改走中继」" || bad "阶段没报全：$(grep -o '^@STATE [^：]*' "$W/diag-relay.log" | sort -u | tr '\n' '|')"
+	diag_unblock
+
+	# 到这里每次连接结束都该当场上报成功（服务器收到、本机队列为空）
+	[[ ! -s $XDG_CACHE_HOME/p2pcp/upload-queue.jsonl ]] && ok "上报都发出去了，本机队列是空的" || bad "队列里还有 $(wc -l <"$XDG_CACHE_HOME/p2pcp/upload-queue.jsonl") 条"
+
+	diag_block rdv
+	n0=$(wc -l <"$R")
+	A "$P" send -server "$SRV" -room "$ROOM.d6" -progress "$W/d.txt" >"$W/diag-rdv.log" 2>&1
+	want_reason "封了会合端口" rdv_unreachable "$W/diag-rdv.log"
+	diag_unblock
+	grep -q '"reason":"rdv_unreachable"' "$XDG_CACHE_HOME/p2pcp/upload-queue.jsonl" 2>/dev/null && ((n0 == $(wc -l <"$R"))) &&
+		ok "连不上会合服务器时，上报进了本机队列" || bad "rdv_unreachable 没进队列"
+	# 放开后再连一次：这条和队列里的一起发出去（5 分钟的暂停是为真实网络准备的，这里删掉标记）
+	rm -f "$XDG_CACHE_HOME/p2pcp/upload-failed"
+	bgB "$P" recv -server "$SRV" -room "$ROOM.d7" -o "$W/dout" >"$W/diag-ok-recv.log" 2>&1
+	r=$!
+	A "$P" send -server "$SRV" -room "$ROOM.d7" "$W/d.txt" >"$W/diag-ok.log" 2>&1
+	wait $r
+	grep -q '"reason":"rdv_unreachable"' "$R" && [[ ! -s $XDG_CACHE_HOME/p2pcp/upload-queue.jsonl ]] &&
+		ok "网络恢复后补发了队列" || bad "没补发：服务器 $(grep -c rdv_unreachable "$R") 条 rdv_unreachable"
+
+	local c
+	for c in peer_offline conn_lost punch_blocked relay_failed rdv_unreachable; do
+		grep -q "\"reason\":\"$c\"" "$hist" || bad "history 里没有 $c"
+		grep -q "\"reason\":\"$c\"" "$R" || bad "服务器没收到 $c 的上报"
+	done
+	ok "history 和服务器上报里各类原因码都有（上报 $(wc -l <"$R") 条）"
+	grep -q '没有这个文件\|d\.bin\|d\.txt' "$R" && bad "上报里出现了文件名" || ok "上报里没有文件名"
+	grep -q '"ver":"[0-9.]*".*"dev\|"conn":"' "$R" && ok "上报带版本、连接号" || bad "上报缺版本 / 连接号"
+	ls "$XDG_CACHE_HOME"/p2pcp/trace/*.txt >/dev/null 2>&1 && ok "连接过程记录 $(ls "$XDG_CACHE_HOME"/p2pcp/trace | wc -l) 个" || bad "没有连接过程记录"
+	A "$P" report -server "$SRV" -progress >"$W/diag-report.log" 2>&1
+	local rp
+	rp=$(sed -n 's/^@REPORT //p' "$W/diag-report.log")
+	[[ -s $rp ]] && grep -q '本机体检' "$rp" && grep -q 'relay_failed' "$rp" && ! grep -q 'd\.bin\|没有这个文件' "$rp" &&
+		ok "诊断报告 $(($(wc -c <"$rp") / 1024))KB，文件名已打码" || bad "诊断报告不对：$rp"
+	python3 -I "$HERE/../real/report-stats.py" "$R" >"$W/diag-stats.md" 2>&1 && grep -q '## 原因码' "$W/diag-stats.md" &&
+		ok "统计脚本出表：$(grep -c '^| [a-z_]* |' "$W/diag-stats.md") 种原因码" || bad "统计脚本出错：$(tail -n 3 "$W/diag-stats.md")"
 }
 
 for t in $TESTS; do "t_$t"; done

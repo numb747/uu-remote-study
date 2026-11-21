@@ -24,6 +24,9 @@ package main
 
 import (
 	"bufio"
+	"crypto/sha256"
+	"encoding/hex"
+	"encoding/json"
 	"flag"
 	"fmt"
 	"log"
@@ -134,7 +137,9 @@ func runServer(args []string) {
 	fs := flag.NewFlagSet("server", flag.ExitOnError)
 	listen := fs.String("listen", ":7000", "UDP 监听地址，逗号分隔可以听多个")
 	relay := fs.String("relay", "", "中继 UDP 监听地址，如 :3478（空 = 不开中继）")
+	reports := fs.String("reports", "", "p2pcp 诊断上报（/H）追加到这个 jsonl，如 /var/lib/uu-rendezvous/reports.jsonl（空 = 不收）")
 	fs.Parse(args)
+	saveReport := reportSink(*reports)
 
 	var (
 		mu    sync.Mutex
@@ -223,6 +228,13 @@ func runServer(args []string) {
 				if alt := other(conn); alt != nil {
 					alt.WriteToUDP([]byte("/F2 "+f[1]), from)
 				}
+			case n > 3 && string(buf[:3]) == "/H " && saveReport != nil:
+				// p2pcp 的诊断上报：一条 JSON 结果记录，收下回 /HK <sha256 前 8 位>，客户端没收到就留着下次补发
+				body := buf[3:n]
+				if saveReport(from, body) {
+					sum := sha256.Sum256(body)
+					conn.WriteToUDP([]byte("/HK "+hex.EncodeToString(sum[:4])), from)
+				}
 			case len(f) == 3 && f[0] == "/U2":
 				unregister("v2|"+f[1], f[2])
 			case len(f) == 5 && f[0] == "/R2" && len(f[1]) <= 64 && len(f[2]) <= 40:
@@ -248,6 +260,42 @@ func runServer(args []string) {
 		go serve(conn)
 	}
 	serve(conns[0])
+}
+
+// reportSink 返回收 p2pcp 诊断上报的函数（path 为空时返回 nil）：每条包成一行
+// {"rx": 收到的时间, "from": 源地址, "r": 原样的记录}，超过 100MB 把旧文件改名成 .1 再写新的。
+// 记录里有两端的公网 IP，这个文件不能进公开仓库（DESIGN 决策 22）
+func reportSink(path string) func(from *net.UDPAddr, body []byte) bool {
+	if path == "" {
+		return nil
+	}
+	var mu sync.Mutex
+	return func(from *net.UDPAddr, body []byte) bool {
+		if len(body) > 1400 || !json.Valid(body) || body[0] != '{' {
+			return false
+		}
+		line, err := json.Marshal(struct {
+			Rx   time.Time       `json:"rx"`
+			From string          `json:"from"`
+			R    json.RawMessage `json:"r"`
+		}{time.Now().UTC(), from.String(), body})
+		if err != nil {
+			return false
+		}
+		mu.Lock()
+		defer mu.Unlock()
+		if st, err := os.Stat(path); err == nil && st.Size() > 100<<20 {
+			os.Rename(path, path+".1")
+		}
+		f, err := os.OpenFile(path, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o600)
+		if err != nil {
+			log.Printf("写诊断上报失败：%v", err)
+			return false
+		}
+		defer f.Close()
+		_, err = f.Write(append(line, '\n'))
+		return err == nil
+	}
 }
 
 // relaySess 是一对中继端点：d = 发起连接的一端，l = 等连接的一端

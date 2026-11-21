@@ -13,7 +13,10 @@ package main
 // 多轮重试共用一个 preflight，预测只报一次。
 
 import (
+	"encoding/json"
+	"fmt"
 	"log"
+	"runtime"
 	"slices"
 	"strings"
 	"sync"
@@ -34,6 +37,21 @@ type preflight struct {
 	checked  bool          // 预测和实际已经对过
 	settled  bool          // 结果已经报过、记过
 	forced   bool          // 有一端用了 -relay always：走中继是强制的，不拿预测去比
+	tr       trace         // 这次连接的过程记录（trace.go），settle 时落盘
+	cfg      string        // 配置目录（上报开关、设备哈希）
+	servers  string        // 会合地址（上报发给它）
+	conn     string        // 连接号（connHash）
+	peerVer  string        // 对方会合标志里的 v=
+}
+
+// setConn 记下连接号（拿到对方 id 时）
+func (p *preflight) setConn(id string) {
+	if p == nil {
+		return
+	}
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.conn = id
 }
 
 // setForced：强制走中继（本端 -relay always，或对方的标志里有 forced）
@@ -93,7 +111,7 @@ func (p *preflight) compare() {
 
 // startPreflight 在后台测本机画像（先查缓存），立刻返回
 func startPreflight(o opts, role string) *preflight {
-	p := &preflight{role: role, rep: o.rep, ready: make(chan struct{})}
+	p := &preflight{role: role, rep: o.rep, ready: make(chan struct{}), cfg: configDir(o), servers: o.server}
 	go func() { p.setMe(cachedProfile(o)) }() // 别写成 go p.setMe(cachedProfile(o))：参数在当前 goroutine 里求值，就不并行了
 	return p
 }
@@ -141,6 +159,13 @@ func (p *preflight) sawPeer(flags string) {
 	if slices.Contains(strings.Split(flags, ","), "forced") {
 		p.setForced()
 	}
+	for _, f := range strings.Split(flags, ",") {
+		if v, ok := strings.CutPrefix(f, "v="); ok && len(v) <= 16 {
+			p.mu.Lock()
+			p.peerVer = v
+			p.mu.Unlock()
+		}
+	}
 	pp := parseNat(flags)
 	if pp.Class == "" {
 		return
@@ -172,8 +197,8 @@ func (p *preflight) settle(out outcome) {
 	}
 	p.wait(1500 * time.Millisecond)
 	p.mu.Lock()
-	defer p.mu.Unlock()
 	if p.settled {
+		p.mu.Unlock()
 		return
 	}
 	p.settled = true
@@ -193,7 +218,14 @@ func (p *preflight) settle(out outcome) {
 	}
 	rec.Forced = p.forced
 	rec.Wrong = !p.forced && wrongPrediction(rec.Predict, rec.Actual)
-	log.Printf("体检  %s", resultLine(rec))
+	rec.Reason, rec.Ver, rec.OS = out.reason, version, runtime.GOOS+"/"+runtime.GOARCH
+	rec.PeerVer, rec.Conn = p.peerVer, p.conn
+	line := resultLine(rec)
+	log.Printf("体检  %s", line)
 	appendHistory(rec)
 	p.rep.check(rec)
+	b, _ := json.Marshal(rec)
+	writeTrace(p.role, p.tr.render(fmt.Sprintf("p2pcp %s %s，角色 %s", version, rec.OS, p.role), line+"\n"+string(b)))
+	p.mu.Unlock()
+	upload(p.cfg, p.servers, rec) // 诊断数据上报（upload.go），发不出去就进队列；有网络往返，别拿着锁
 }

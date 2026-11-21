@@ -38,7 +38,7 @@ magick -size 192x192 xc:none -fill '#1a1b26' -draw 'roundrectangle 0,0 191,191 4
 "$BT/aapt2" compile --dir "$OUT/resin" -o "$OUT/res/res.zip"
 printf 'server=%s\n' "$SERVER" > "$OUT/assets/config.properties"
 "$BT/aapt2" link -o "$OUT/base.apk" -I "$JAR" --manifest AndroidManifest.xml \
-	--min-sdk-version 29 --target-sdk-version 34 --version-code "$(date +%s)" --version-name 0.2 \
+	--min-sdk-version 29 --target-sdk-version 34 --version-code "$(date +%s)" --version-name 0.3 \
 	-A "$OUT/assets" "$OUT/res/res.zip"
 
 # 3. Java → dex

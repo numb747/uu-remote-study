@@ -83,19 +83,23 @@ func authConn(conn *quic.Conn, secret []byte, client bool) error {
 		str, err = conn.AcceptStream(ctx)
 	}
 	if err != nil {
-		return fmt.Errorf("认证：%w", err)
+		return withReason(rsnLost, fmt.Errorf("认证：%w", err))
 	}
 	str.SetDeadline(time.Now().Add(wait))
 	mine, want := proof("server"), proof("client")
 	if client {
 		mine, want = want, mine
 		if _, err := str.Write(mine); err != nil {
-			return fmt.Errorf("认证：%w", err)
+			return withReason(rsnLost, fmt.Errorf("认证：%w", err))
 		}
 	}
 	got := make([]byte, len(want))
 	if _, err := io.ReadFull(str, got); err != nil {
-		return fmt.Errorf("认证：%w", err)
+		// 对方验不过我们的证明，会以 0x50 关连接：这边看到的是读失败，归成认证失败（原因码 auth_failed）
+		if ae := (*quic.ApplicationError)(nil); errors.As(err, &ae) && ae.ErrorCode == 0x50 {
+			return fmt.Errorf("%w（对方验不过本端的证明）", errAuth)
+		}
+		return withReason(rsnLost, fmt.Errorf("认证：%w", err))
 	}
 	if !hmac.Equal(got, want) {
 		conn.CloseWithError(0x50, "auth")
@@ -103,7 +107,7 @@ func authConn(conn *quic.Conn, secret []byte, client bool) error {
 	}
 	if !client { // 服务端先验对方、再给自己的证明：不知道密钥的人连一个字节的证明都拿不到
 		if _, err := str.Write(mine); err != nil {
-			return fmt.Errorf("认证：%w", err)
+			return withReason(rsnLost, fmt.Errorf("认证：%w", err))
 		}
 	}
 	str.Close()

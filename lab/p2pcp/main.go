@@ -15,6 +15,9 @@
 //	p2pcp contacts [rm 名字 | rename 旧名 新名]     好友列表
 //	p2pcp send -to 好友 文件...                    发给好友
 //	p2pcp serve [-o 目录]                          常驻接收所有好友发来的文件（按好友分目录），也替 invite 等对方来加好友
+//	p2pcp report [文件]                           诊断报告：现测一次网络 + 最近的连接记录、连接过程、日志、崩溃现场（diag.go），
+//	                                             好友名和文件名换成代号，可以直接发微信
+//
 //	p2pcp forward -room demo [-listen 127.0.0.1:2223] 本机端口转发到 expose 那端，比如 rsync 走 ssh -p 2223
 //
 // 分层：会合 + 打洞 + 中继兜底（rdv.go）→ QUIC 接管 socket（link.go）→ 用房间密钥做通道绑定认证（auth.go）
@@ -41,11 +44,15 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"runtime/debug"
 	"strings"
 	"sync/atomic"
 	"syscall"
 	"time"
 )
+
+// version 随会合标志（v=）、预测记录、上报、诊断报告一起报：服务器那边按版本统计，旧版的问题能区分开
+const version = "0.6.0"
 
 const (
 	msgPunch = "/PP" // 探测（按前 3 字节识别；首字节最高两位必须是 0，quic-go 才会交给 ReadNonQUICPacket）
@@ -121,7 +128,7 @@ func main() {
 	}
 	role := os.Args[1]
 	switch role {
-	case "send", "recv", "daemon", "check", "expose", "forward", "serve", "id", "invite", "join", "contacts":
+	case "send", "recv", "daemon", "check", "expose", "forward", "serve", "id", "invite", "join", "contacts", "report":
 	default:
 		usage()
 	}
@@ -157,6 +164,7 @@ func main() {
 		"手机后台可以拉长到 20s 省电（对方来时最多晚一个间隔被配上）")
 	fs.StringVar(&o.listen, "listen", "127.0.0.1:2223", "forward：本地监听地址")
 	fs.DurationVar(&o.timeout, "timeout", 60*time.Second, "等对方的超时（daemon 模式下无效）")
+	upload := fs.String("upload", "", "诊断数据上报：on | off，记进配置目录的 settings.json，以后一直有效（默认开，见 upload.go）")
 	progress := fs.Bool("progress", false, "在 stdout 输出机器可读的进度行")
 	notify := fs.Bool("notify", false, "用 notify-send 弹桌面通知")
 	fs.Parse(os.Args[2:])
@@ -175,14 +183,32 @@ func main() {
 		o.server = serverConf()
 	}
 	// 不碰网络的命令、会合地址另有来处的命令（join 听邀请码的，send -to 听好友记录的，serve 每个好友各有地址）不要求 -server
-	needServer := !(role == "id" || role == "contacts" || role == "join" || role == "serve" || o.friend != "")
+	needServer := !(role == "id" || role == "contacts" || role == "join" || role == "serve" || role == "report" || o.friend != "")
 	if o.server == "" && needServer {
 		log.Fatal("没有会合服务器：用 -server IP:7001 指定，或者写进 ~/.config/p2pcp/server（也认环境变量 P2PCP_SERVER）。" +
 			"在一台有公网 IP 的机器上跑 punch server -listen :7001 -relay :3478，放行 UDP 7001 和 3478")
 	}
 	o.rep = &reporter{machine: *progress, notify: *notify}
 	o.regEvery = 500 * time.Millisecond
+	if role != "id" && role != "contacts" && os.Getenv("P2PCP_NO_LOG") == "" {
+		setupLog(role) // 日志落盘（diag.go），诊断报告要用
+	}
+	setupCrash(o.rep)
 	exitGracefully()
+	switch *upload {
+	case "":
+	case "on", "off":
+		cfg := configDir(o)
+		st := loadSettings(cfg)
+		on := *upload == "on"
+		st.Upload = &on
+		if err := saveSettings(cfg, st); err != nil {
+			log.Fatal(err)
+		}
+		log.Printf("诊断数据上报：%s（记在 %s）", map[bool]string{true: "开", false: "关"}[on], settingsPath(cfg))
+	default:
+		log.Fatal("-upload 只能是 on 或 off")
+	}
 
 	var err error
 	if o.friend != "" && (role == "send" || role == "check") {
@@ -211,6 +237,8 @@ func main() {
 		err = cmdJoin(o, fs.Arg(0))
 	case "contacts":
 		err = cmdContacts(o, fs.Args())
+	case "report":
+		err = cmdReport(o, fs.Args())
 	case "recv":
 		err = recv(o)
 	case "check":
@@ -257,10 +285,18 @@ func keepServing(o opts, waiting string, accept func(opts) (*link, error), serve
 			backoff = 0
 			active.Add(1)
 			go func() {
+				defer func() {
+					// 一个连接里出的 panic 不该带走整个常驻接收：留下现场（diag.go），关掉这个连接，接着等下一个
+					if r := recover(); r != nil {
+						path := saveCrash(r, debug.Stack())
+						l.close()
+						o.rep.fail(fmt.Errorf("内部错误（%v），现场存在 %s，请生成诊断报告发给我", r, path))
+					}
+					if active.Add(-1) == 0 && waiting != "" {
+						o.rep.state(waiting)
+					}
+				}()
 				serve(l)
-				if active.Add(-1) == 0 && waiting != "" {
-					o.rep.state(waiting)
-				}
 			}()
 		case errors.Is(err, errStopped):
 			return
@@ -298,6 +334,7 @@ func usage() {
 	fmt.Println("usage: p2pcp send|recv|daemon|check|expose|forward [flags] [文件...]")
 	fmt.Println("       p2pcp id | invite | join <邀请码> | contacts | send -to 好友 文件... | serve   通讯录模式")
 	fmt.Println("       p2pcp check              本机这一侧的网络体检")
+	fmt.Println("       p2pcp report             生成诊断报告（-upload on|off 开关诊断数据上报）")
 	fmt.Println("       p2pcp check -room 名字    两端各跑一次：双端体检（画像、预测、实际打洞、往返和丢包、中继）")
 	os.Exit(2)
 }

@@ -22,6 +22,7 @@ type outcome struct {
 	actual    string // 直连 / 中继 / 失败
 	via       string // 对方地址或中继地址
 	err       string
+	reason    string        // 原因码（reason.go），成功时为空
 	took      time.Duration // 从开始会合到打通（含重试）
 	punch     time.Duration // 成功那一轮的打洞（或进中继）用时
 	handshake time.Duration // QUIC 握手 + 认证
@@ -82,6 +83,13 @@ type histRec struct {
 	// actual 仍记中继（开局时的实际结果），升级不算预测错
 	UpgradedAfterMs int64  `json:"upgraded_after_ms,omitempty"`
 	UpgradedVia     string `json:"upgraded_via,omitempty"`
+	// 诊断（DESIGN 决策 22、23）：失败的原因码、p2pcp 版本、系统
+	Reason string `json:"reason,omitempty"`
+	Ver    string `json:"ver,omitempty"`
+	OS     string `json:"os,omitempty"`
+	// 对方的版本（会合标志里的 v=，旧版没有）；连接号：两端算出来一样，统计时对上同一次连接的两条记录（upload.go）
+	PeerVer string `json:"peer_ver,omitempty"`
+	Conn    string `json:"conn,omitempty"`
 }
 
 // wrongPrediction 预测和实际对不上（「不确定」「无法预测」不算错）
@@ -115,6 +123,12 @@ func resultLine(r histRec) string {
 		}
 	} else if r.Err != "" {
 		s += "（" + r.Err + "）"
+	}
+	if r.Reason != "" {
+		if r.Actual != "失败" { // 连上之后才出的错（断线、认证没过）
+			s += "，之后出错：" + r.Err
+		}
+		s += "，原因码 " + r.Reason
 	}
 	switch {
 	case r.Predict == "":
