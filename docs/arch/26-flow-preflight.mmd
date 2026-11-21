@@ -10,7 +10,7 @@ flowchart TD
   policy["按预测定重试：能通 → 照旧两轮不通才中继；不通 → 一轮不通就请求中继<br/>connect 的 early；-relay off 时不变"]
   relay["中继兜底<br/>joinRelay"]
   xfer["传输：QUIC 接管 + 通道绑定认证 + 4MB 分块续传<br/>dialPeer / sendSession"]
-  upgrade["后台升级：走中继时隔一段再打洞，升级房间由 EKM 派生<br/>打通就在直连上重开会话，have 只报缺的块"]:::planned
+  upgrade["后台升级：走中继 15 秒起打洞（失败翻倍，最长 2 分钟），升级房间由 EKM 派生，接收端另开 socket 等<br/>打通就关中继、在直连上重开会话续传；end → ok 之间不切<br/>upgrader / waitUpgrade"]
   pairtest["实测：QUIC + 认证后双向互 ping 3 秒测 RTT / 丢包，再测中继，打完整报告<br/>pingPong / probeRelay"]
   report["结果行：实际路径、打洞 / 握手分开计时、预测对没对上；-progress 输出 @CHECK<br/>preflight.settle / resultLine"]
   history["预测记录，打洞失败也记<br/>~/.cache/p2pcp/history.jsonl"]
@@ -29,6 +29,7 @@ flowchart TD
   relay -->|"经中继"| xfer
   xfer -.->|"走中继时"| upgrade
   upgrade -.->|"打通：直连上重开会话"| xfer
+  upgrade -.->|"升级房间 /R2"| rdv
   punch -->|"check -room 时"| pairtest
   predict -->|"预测进报告"| report
   xfer -->|"结束时"| report
@@ -47,6 +48,6 @@ flowchart TD
 %% @src punch lab/p2pcp/rdv.go func connectOnce(
 %% @src relay lab/p2pcp/rdv.go func joinRelay(
 %% @src xfer lab/p2pcp/link.go func dialPeer(
+%% @src upgrade lab/p2pcp/upgrade.go func startUpgrade(
 %% @link profile 33-nat-profile.mmd
 %% @link xfer 24-flow-p2pcp.mmd
-classDef planned stroke:#bb9af7,stroke-width:2px,stroke-dasharray:3 4
