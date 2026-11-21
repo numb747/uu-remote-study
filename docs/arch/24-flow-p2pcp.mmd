@@ -1,24 +1,24 @@
 flowchart TD
   entry["入口 ×2：电脑 p2p-direct / 手机 App<br/>都是启动 p2pcp send / daemon（多个文件一次发）"]
-  rid["房间号 = HMAC(房间名)，房间名不上线路<br/>roomSecret / roomID；id = 角色.随机数"]:::changed
+  rid["房间号 = HMAC(房间名)，房间名不上线路<br/>roomSecret / roomID；id = 角色.随机数"]
   rdv["会合 + 中继 8.140.18.211<br/>会合 7001 / 7000（房间共享），中继 3478"]
 
   subgraph addr["① 寻址：会合 v2"]
-    reg["新开 IPv4 socket（-bind auto 每轮现取网卡），有全局 IPv6 再开一个<br/>/R2 房间号 id 候选 标志"]:::changed
-    you["回执 /Y = 本方公网映射<br/>低端口 / 2 秒无回执 → 坏端口；等待中回执断了 → 失联"]:::changed
-    peer["收到 /P → 对方候选 + 标志<br/>打洞期间每 500ms 继续注册，打完才 /U2：PEER 丢一个还有下一个"]:::changed
+    reg["新开 IPv4 socket（-bind auto 每轮现取网卡），有全局 IPv6 再开一个<br/>/R2 房间号 id 候选 标志"]
+    you["回执 /Y = 本方公网映射<br/>低端口 / 2 秒无回执 → 坏端口；等待中回执断了 → 失联"]
+    peer["收到 /P → 对方候选 + 标志<br/>打洞期间每 500ms 继续注册，打完才 /U2：PEER 丢一个还有下一个"]
   end
   subgraph pass["② 放行：打洞（IPv4、IPv6 同时）"]
-    punch["每 20ms 向全部候选发 /PP；收到对方 /PP 回 /PA 并反发一次（触发检查）<br/>来源不在候选里（对方是对称型）、重推的 /P 里对方换了新地址，都加进目标一直打"]:::changed
+    punch["每 20ms 向全部候选发 /PP；收到对方 /PP 回 /PA 并反发一次（触发检查）<br/>来源不在候选里（对方是对称型）、重推的 /P 里对方换了新地址，都加进目标一直打"]
     chosen["发送端：第一个 /PA 定路径<br/>用包的源地址作对端（prflx），关掉另一个 socket"]
-    nom["提名：发起方在选中路径上发 3 个 /PN 再 Dial<br/>非发起方见到 /PN 或 QUIC Initial 就停（不再吞掉 Initial）"]:::changed
+    nom["提名：发起方在选中路径上发 3 个 /PN 再 Dial<br/>非发起方见到 /PN 或 QUIC Initial 就停（不再吞掉 Initial）"]
     retry["4 秒不通、坏端口或失联 → 换新端口、换下一个会合地址重来<br/>最多 6 轮，失败时分层诊断"]
-    relay["发送端两轮打不通（预测打不通时一轮）：/R2 带 relay 标志，对方中途看到就跟；等凑齐时继续注册<br/>goRelay / joinRelay：/L 房间号.发送端id d|l → /LK"]:::changed
+    relay["发送端两轮打不通（预测打不通时一轮）：/R2 带 relay 标志，对方中途看到就跟；等凑齐时继续注册<br/>goRelay / joinRelay：/L 房间号.发送端id d|l → /LK"]
   end
   subgraph data["③ 传输：QUIC 接管同一个 socket"]
-    quic["newLink：quic.Transport 接管（quietConn 把发送错误当丢包）<br/>后台 readNonQUIC 回应迟到的 /PP；SIGTERM 时 closeLive"]:::changed
-    auth["通道绑定认证：HMAC(密钥, 角色 + EKM)，第一条流交换<br/>authConn，对不上就关连接"]:::changed
-    conns["同一个洞上再 l.dial 第 2…N 条连接（-conns，默认 2；中继时 1 条）<br/>各自 applyCC，默认 bbr"]:::changed
+    quic["newLink：quic.Transport 接管（quietConn 把发送错误当丢包）<br/>后台 readNonQUIC 回应迟到的 /PP；SIGTERM 时 closeLive"]
+    auth["通道绑定认证：HMAC(密钥, 角色 + EKM)，第一条流交换<br/>authConn，对不上就关连接"]
+    conns["同一个洞上再 l.dial 第 2…N 条连接（-conns，默认 2；中继时 1 条）<br/>各自 applyCC，默认 bbr"]
     pieces["控制流 offer → have（已收区间）；缺的切成 4MB 块，各连接抢着发，一块一条单向流<br/>接收端写 .part、区间记进 .json；end 带 sha256，校验过才改名；断了留半成品"]:::changed
   end
 
@@ -33,13 +33,14 @@ flowchart TD
   chosen -->|"发送端"| nom
   punch -.->|"4 秒不通"| retry
   retry -.->|"新 socket"| reg
-  retry -.->|"发送端第 3 轮起"| relay
+  retry -.->|"发送端第 3 轮起（预测打不通时第 2 轮）"| relay
   relay -->|"经中继转发"| quic
   nom -->|"同一个 socket"| quic
   quic -->|"Dial / Accept 之后"| auth
   auth -->|"发送端"| conns
   conns -->|"sendPiece"| pieces
   pieces -.->|"连接断了：send 自己重连，have 只报缺的"| rid
+  pieces -.->|"走中继时 15 秒起：升级房间里 connectOnce，通了关中继、直连上重开会话（upgrade.go）"| reg
 
 %% @src entry apps/pc/p2p-direct case ${1:-} in
 %% @src rid lab/p2pcp/auth.go func roomID(

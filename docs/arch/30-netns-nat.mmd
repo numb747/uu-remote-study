@@ -1,34 +1,35 @@
 flowchart TD
-  matrix["matrix：3×3 NAT 组合 × repeat<br/>输出成功矩阵"]
-  once["once：每次一个新宇宙，跑完从日志取 via / RTT<br/>unshare -Urnm，summarize"]
+  once["matrix：4×4 NAT 组合 × repeat，输出成功矩阵；once：每次一个新宇宙，跑完从日志取 via / RTT<br/>unshare -Urnm，summarize"]:::changed
   bday_role["按双方 NAT 类型分配生日角色<br/>bday_role"]
   setup["拓扑：peer — nat — inet 路由器 — nat — peer<br/>setup / add_side"]
   run_punch["inet 上起会合服务器，两端起 peer<br/>run_punch"]
   punch_bin["punch server / peer"]
-  script["script 模式：搭好宇宙后在里面执行一个脚本<br/>lab.sh script natA natB 脚本"]:::changed
-  p2pcp_test["p2pcp 回归测试：send / resume / reconn / tunnel / upgrade<br/>inet 上起 server + 中继；tc 限速、nft 封端口逼它续传、迁移"]:::changed
+  script["script 模式：搭好宇宙后在里面执行一个脚本<br/>lab.sh script natA natB 脚本"]
+  p2pcp_test["脚本 ×3：p2pcp 回归测试（体检、轮次错位、check -room、传文件、续传、重连、迁移、中继升级）；filter-check 过滤演示；conflict-demo 冲突抓包<br/>inet 上起 server + 中继 + 两个 STUN 应答端；tc 限速、nft 封端口 / 限速中继"]:::changed
 
   subgraph table["NAT 状态表：nat_rules 按类型写 nft 规则"]
     nat_rules["nat_rules"]
     nat_port["port：EIM + APDF<br/>masquerade（Linux 默认）"]
     nat_sym["sym：EDM 对称<br/>masquerade fully-random"]
     nat_full["full：EIM + EIF<br/>prerouting 全部 UDP dnat 给内网"]
+    nat_restricted["restricted：EIM + ADF<br/>出包把「对方 IP . 本方端口」记进动态集合，入包只核对源 IP"]:::changed
     fw["防火墙：WAN 来的 ct state new 丢弃<br/>丢在 conntrack 确认之前"]
     nofw["--no-fw：先到的包被确认成 conntrack<br/>→ 本方映射冲突，换端口"]
   end
   conntrack[(Linux conntrack 表)]
 
-  matrix --> once
   once --> bday_role
   once -->|"经 inner"| setup
   setup --> nat_rules
   nat_rules --> nat_port
   nat_rules --> nat_sym
   nat_rules --> nat_full
+  nat_rules --> nat_restricted
   nat_rules --> fw
   nat_port -->|"读写映射"| conntrack
   nat_sym -->|"读写映射"| conntrack
   nat_full -->|"读写映射"| conntrack
+  nat_restricted -->|"读写映射"| conntrack
   fw -->|"不留记录"| conntrack
   nofw -.->|"关掉"| fw
   once -->|"经 inner"| run_punch
@@ -38,7 +39,6 @@ flowchart TD
   script -->|"bash 脚本"| p2pcp_test
   p2pcp_test -->|"ip netns exec inet … server -relay"| punch_bin
 
-%% @src matrix lab/netns/lab.sh matrix)
 %% @src once lab/netns/lab.sh once() {
 %% @src bday_role lab/netns/lab.sh bday_role() {
 %% @src setup lab/netns/lab.sh add_side() {
@@ -50,6 +50,7 @@ flowchart TD
 %% @src nat_port lab/netns/lab.sh port) $nft add rule ip nat post oifname wan masquerade ;;
 %% @src nat_sym lab/netns/lab.sh masquerade fully-random
 %% @src nat_full lab/netns/lab.sh udp dport 1024-65535 dnat
+%% @src nat_restricted lab/netns/lab.sh update @contacted
 %% @src fw lab/netns/lab.sh ct state new drop
 %% @src nofw lab/netns/lab.sh --no-fw) NO_FW=1
 classDef changed stroke:#e0af68,stroke-width:3px,stroke-dasharray:7 4

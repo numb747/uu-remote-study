@@ -5,13 +5,13 @@ flowchart LR
     ssh_cfg["ssh 别名 monkey-p2p<br/>~/.ssh/config：Port 2223，HostKeyAlias 沿用 2222"]
     fwd["监听 127.0.0.1:2223，每个 TCP 连接开一条流<br/>forward"]
     open["连接断了才重新打洞，否则复用<br/>open → dialTunnel"]
-    keep["心跳盯路径：断了、换网了、在走中继，就打新洞把连接迁过去<br/>keepPath → migrate"]:::changed
+    keep["心跳盯路径：断了、换网了、在走中继，就打新洞把连接迁过去<br/>keepPath → migrate"]
   end
-  rdv["会合 + 中继 8.140.18.211<br/>会合 7001 / 7000，中继 3478（打不通时兜底）"]:::changed
-  conn["一条 QUIC 连接（BBR），通道绑定认证后才开流<br/>dialPeer / acceptPeer → newLink → authConn"]:::changed
+  rdv["会合 + 中继 8.140.18.211<br/>会合 7001 / 7000，中继 3478（打不通时兜底）"]
+  conn["一条 QUIC 连接（BBR），通道绑定认证后才开流<br/>dialPeer / acceptPeer → newLink → authConn"]
   subgraph remote["对端 monkey（测试机）"]
-    exp["常驻：接上一个就回房间接着等，可同时服务多个 forward<br/>expose → keepServing → serveTunnel"]:::changed
-    help["挂在迁移房间里，对方换了地址就往那里打洞；心跳原样弹回<br/>helpMigrate"]:::changed
+    exp["常驻：接上一个就回房间接着等，可同时服务多个 forward<br/>expose → keepServing → serveTunnel"]
+    help["挂在迁移房间里，对方换了地址就往那里打洞；心跳原样弹回<br/>helpMigrate"]
     dial_to["每条流连 -to<br/>net.DialTimeout"]
     sshd["sshd 127.0.0.1:22"]
   end
@@ -51,4 +51,3 @@ flowchart LR
 %% @link keep 25-flow-migrate.mmd
 %% @link open 24-flow-p2pcp.mmd
 %% @link rdv 20-flow-punch.mmd
-classDef changed stroke:#e0af68,stroke-width:3px,stroke-dasharray:7 4

@@ -1,21 +1,21 @@
 flowchart LR
   subgraph punch_pkg["lab/punch：会合 + 打洞实验"]
-    punch_server["会合服务器 + 中继：多端口、房间共享、按 IP 限速；v1 / v2 两版协议<br/>runServer（REG·/R2 → PEER·/P）/ runRelay（/L → /LK，之后原样互转）"]:::changed
+    punch_server["会合服务器 + 中继：多端口、房间共享、按 IP 限速；v1 / v2 两版协议；/FT 过滤测试应答<br/>runServer（REG·/R2 → PEER·/P）/ runRelay（/L → /LK，之后原样互转）"]:::changed
     punch_peer["打洞对等端 ×3<br/>runPeer / sock.send / hostCandidates"]
   end
   set_ttl["设置 IP_TTL ×2<br/>setTTL"]
-  np["natprobe：NAT 画像测试 + 手工打洞 ×2<br/>runStun·Filter·TTL·Life / runPeer"]
-  stunprobe["映射行为探测<br/>stunprobe"]
+  np["NAT 探测工具 ×3：natprobe 画像测试 + 手工打洞，stunprobe 映射探测<br/>runStun·Filter·TTL·Life / runPeer / stunprobe"]
   subgraph p2pcp_pkg["lab/p2pcp：打洞直连"]
-    p2p_connect["会合 v2（房间号、打洞期间持续注册）+ 双栈打洞 + 提名 + 中继兜底；check 体检<br/>connect / connectOnce / joinRelay（rdv.go）"]:::changed
-    p2p_link["QUIC 接管打通的 socket：一个洞上多条连接、通道绑定认证、发送错误当丢包<br/>newLink / dialPeer / acceptPeer / authConn / quietConn（link.go、auth.go）"]:::changed
-    p2p_xfer["传文件：4MB 块单向流、断点续传、自动重连、整文件 sha256<br/>send / sendSession / recvFile / recvPiece / daemon（transfer.go）"]:::changed
-    p2p_tunnel["端口转发 + 连接迁移：expose 并发接入，forward 心跳、换网打新洞迁过去<br/>expose / forward / keepPath / migrate（tunnel.go）"]:::changed
+    p2p_connect["会合 v2（房间号、打洞期间持续注册、轮次同步）+ 双栈打洞 + 提名 + 中继兜底；单端 check<br/>connect / connectOnce / joinRelay（rdv.go）"]:::changed
+    p2p_preflight["体检：本机 NAT 画像（公开 STUN + /FT，按网络缓存）、双端预测、结果行 / history / @CHECK；check -room 双端体检<br/>startPreflight / natProfile / predict / settle / checkPair"]:::changed
+    p2p_link["QUIC 接管打通的 socket：一个洞上多条连接、通道绑定认证、发送错误当丢包<br/>newLink / dialPeer / acceptPeer / authConn / quietConn（link.go、auth.go）"]
+    p2p_xfer["传文件：4MB 块单向流、断点续传、自动重连、整文件 sha256；走中继时后台升级到直连<br/>send / sendSession / recvFile / recvPiece / daemon（transfer.go）/ upgrader（upgrade.go）"]:::changed
+    p2p_tunnel["端口转发 + 连接迁移：expose 并发接入，forward 心跳、换网打新洞迁过去<br/>expose / forward / keepPath / migrate（tunnel.go）"]
   end
   hyscc["Hysteria 拥塞控制<br/>third_party/hyscc bbr / brutal"]
   apps["P2P 直传软件 ×2<br/>安卓 App MainActivity / 电脑端 p2p-direct"]
-  lab_sh["netns 实验室 ×2<br/>lab.sh / p2pcp-test.sh"]:::changed
-  pcphone["PC ↔ 手机编排 ×2<br/>pcphone.sh / cc-bench.sh"]
+  lab_sh["netns 实验室 ×4<br/>lab.sh / p2pcp-test.sh / filter-check.sh / conflict-demo.sh"]:::changed
+  pcphone["PC ↔ 手机编排 ×3<br/>pcphone.sh / cc-bench.sh / vs-sendme.sh"]:::changed
   transport["传输层 ×3<br/>transport / fakeenc / xfer"]
   stun_pub[公共 STUN 服务器]
 
@@ -33,21 +33,24 @@ flowchart LR
   apps -->|"exec / ProcessBuilder 启动 send / daemon"| p2p_xfer
   np -->|"runTTL / 低 TTL 预热"| set_ttl
   np -->|"STUN Binding"| stun_pub
-  stunprobe -->|"STUN Binding"| stun_pub
+  p2p_connect -->|"connect 开始时 startPreflight，画像随 /R2 的 nat= 交换"| p2p_preflight
+  p2p_preflight -->|"STUN Binding（测映射）"| stun_pub
+  p2p_preflight -->|"/FT（测过滤）"| punch_server
+  p2p_xfer -->|"走中继时在升级房间里 connectOnce 打洞（dialUpgrade / waitUpgrade）"| p2p_connect
   lab_sh -->|"ip netns exec … server"| punch_server
   lab_sh -->|"ip netns exec … peer"| punch_peer
-  lab_sh -->|"script：p2pcp-test.sh 跑 send / recv / daemon 用例"| p2p_xfer
+  lab_sh -->|"script：p2pcp-test.sh 跑 send / recv / daemon、体检、中继升级用例"| p2p_xfer
   lab_sh -->|"script：p2pcp-test.sh 跑 expose / forward，封端口逼它迁移"| p2p_tunnel
   lab_sh -->|"run_xfer"| transport
   pcphone -->|"natprobe stun / peer -file"| np
   pcphone -->|"xfer -local 复用打洞端口"| transport
-  pcphone -->|"cc-bench：本机 recv + adb 手机 send，逐组比拥塞控制"| p2p_xfer
+  pcphone -->|"cc-bench 逐组比拥塞控制；vs-sendme 和 sendme 对比（本机 + adb 手机）"| p2p_xfer
 
 %% @src punch_server lab/punch/main.go func runServer
 %% @src punch_peer lab/punch/main.go func runPeer
 %% @src set_ttl lab/punch/ttl_unix.go func setTTL
 %% @src np lab/natprobe/main.go func runStun
-%% @src stunprobe lab/stunprobe/main.go func main()
+%% @src p2p_preflight lab/p2pcp/preflight.go func startPreflight(
 %% @src p2p_connect lab/p2pcp/rdv.go func connect(
 %% @src p2p_link lab/p2pcp/link.go func newLink(
 %% @src p2p_xfer lab/p2pcp/transfer.go func sendSession(
@@ -61,6 +64,7 @@ flowchart LR
 %% @link np 22-flow-nat-profile.mmd
 %% @link p2p_connect 24-flow-p2pcp.mmd
 %% @link p2p_link 24-flow-p2pcp.mmd
+%% @link p2p_preflight 26-flow-preflight.mmd
 %% @link lab_sh 30-netns-nat.mmd
 %% @link apps 31-p2p-direct.mmd
 %% @link p2p_tunnel 32-p2p-tunnel.mmd

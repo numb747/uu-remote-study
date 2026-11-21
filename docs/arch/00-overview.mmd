@@ -2,13 +2,13 @@ flowchart LR
   researcher["用户 / 研究者"]
   subgraph product["已落地：P2P 直传"]
     apps["P2P 直传软件 ×2<br/>安卓 App + 电脑常驻服务（换网自动恢复）"]
-    p2pcp["打洞直连核心 lab/p2pcp：断点续传 + 端口转发（换网迁移不断线）<br/>双栈打洞 + QUIC（BBR）+ 房间密钥通道绑定认证"]:::changed
-    rdv["会合 + 中继 8.140.18.211<br/>uu-rendezvous：会合 7000+7001，中继 UDP 3478（打不通时兜底）"]:::changed
-    preflight["体检后再直传（设计中）：NAT 画像 + 双端预测 + 中继后台升级<br/>natProfile / predict / check -room"]:::planned
+    p2pcp["打洞直连核心 lab/p2pcp：断点续传 + 端口转发（换网迁移不断线）<br/>双栈打洞 + QUIC（BBR）+ 房间密钥通道绑定认证"]
+    rdv["会合 + 中继 8.140.18.211<br/>uu-rendezvous：会合 7000+7001（含 /FT 过滤测试应答），中继 UDP 3478（打不通时兜底）"]:::changed
+    preflight["先体检、再直传：NAT 画像（按网络缓存）+ 双端预测 + 结果记录；走中继时后台升级到直连<br/>startPreflight / predict / settle / check -room / upgrader"]:::changed
   end
   subgraph lab["研究实验室"]
-    netns_lab["netns NAT 实验室<br/>lab.sh + nftables / conntrack 模拟 NAT；p2pcp 回归测试"]:::changed
-    real_lab["真实网络编排 ×2<br/>lab/real/pcphone.sh / cc-bench.sh"]
+    netns_lab["netns NAT 实验室<br/>lab.sh + nftables / conntrack 模拟 4 种 NAT（含受限锥）；p2pcp 回归测试、过滤 / 冲突演示"]:::changed
+    real_lab["真实网络编排 ×3<br/>lab/real/pcphone.sh / cc-bench.sh / vs-sendme.sh"]:::changed
     tools["实验工具 ×6：打洞 punch / natprobe / stunprobe，传输 transport / fakeenc / xfer<br/>punch / xfer"]
   end
   real_nat["真实 NAT<br/>家宽路由 / 运营商 CGNAT"]
@@ -24,9 +24,9 @@ flowchart LR
   netns_lab -->|"go build，ip netns exec；运行 xfer"| tools
   netns_lab -->|"script：p2pcp-test.sh 跑传文件、续传、迁移、中继用例"| p2pcp
   real_lab -->|"natprobe（PC + adb 手机）；xfer 复用打洞端口"| tools
-  real_lab -->|"cc-bench：比拥塞控制 × 连接数"| p2pcp
+  real_lab -->|"cc-bench 比拥塞控制 × 连接数；vs-sendme 和 sendme（iroh）对比"| p2pcp
   tools -->|"UDP 穿过（真实网络）"| real_nat
-  p2pcp -->|"send / recv 启动时先体检"| preflight
+  p2pcp -->|"connect 开始时后台体检；走中继时后台升级"| preflight
   preflight -->|"STUN Binding、/FT 过滤测试（经真实 NAT）"| real_nat
   real_nat -->|"STUN Binding"| stun_pub
 
@@ -36,12 +36,12 @@ flowchart LR
 %% @src netns_lab lab/netns/lab.sh main() {
 %% @src real_lab lab/real/pcphone.sh case $1 in
 %% @src tools lab/punch/main.go func main()
+%% @src preflight lab/p2pcp/preflight.go func startPreflight(
 %% @link apps 31-p2p-direct.mmd
 %% @link p2pcp 24-flow-p2pcp.mmd
 %% @link tools 10-modules.mmd
 %% @link preflight 26-flow-preflight.mmd
 %% @link netns_lab 30-netns-nat.mmd
 %% @link real_lab 23-flow-manual-punch.mmd
-%% @commit ac3a392+dirty
+%% @commit d578d66
 classDef changed stroke:#e0af68,stroke-width:3px,stroke-dasharray:7 4
-classDef planned stroke:#bb9af7,stroke-width:2px,stroke-dasharray:3 4
