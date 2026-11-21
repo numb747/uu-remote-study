@@ -76,5 +76,11 @@
   - 节点：26 的 `upgrade`。
   - 文件：`transfer.go`：发送端走中继时启动 `upgradeLoop`（15 秒起，失败翻倍，最长 2 分钟），在由 EKM 派生的升级房间里 `connectOnce`；打通后在直连上 `sendSession`，中继会话取消。接收端（recv / daemon）在中继连接所在的 socket 上挂在升级房间里（参照 tunnel.go 的 `helpMigrate`），接受新会话后，同一个文件的续传状态照常生效。
   - 验证：netns `-relay always` 发 40MB：约 15 秒后切到直连，sha256 一致，日志里有「升级到直连」；netns 先封掉直连 20 秒再放开，能在下一次尝试时升级；真实网络手机 `-relay always` 发一次。
+  - 实施提示（2026-11-21 交接时读代码记下的，开工前先核对）：
+    - 接收端照搬 `tunnel.go` 的 `helpMigrate`：在中继连接的 socket 上（QUIC 占着它，非 QUIC 报文经 `readNonQUIC` 进 `l.sig`）用 `l.tr.WriteTo` 在升级房间 `connSecret(l.conn, "upgrade")` 里以 `recv.` 身份每 5 秒注册；收到对方的 `/P` 就从这个 socket 往对方候选打 4 秒洞。这样新的直连路径终点还是接收端原来那个 `quic.Transport`。
+    - 因此发送端打通后新开 socket 上 `newLink` + `dial()` 的连接，会落到接收端**原来的 Listener**，被 `recvSession` 里已有的 accept 循环（「拒绝一条额外连接」那段）当成同一会话的额外连接接住。两种做法二选一：A. 照决策 3，发送端取消中继会话、在直连上重开会话靠续传接着传（接收端要确认重开的会话能被接住、续传状态生效）；B. 不重开会话，把直连连接加进发送端的连接池、中继连接不再领新块（控制流留在中继上也够用）。B 不丢在途的块，但要看 `sendSession` 里「各连接抢着发」的调度怎么摘掉一条。开工时选定一种，记进决策。
+    - 升级房间号由连接的 EKM 派生，daemon 同时服务多个发送端时互不干扰；发送端用 `send.` 身份、接收端 `recv.`，会合服务器照常配对。
+    - 预测记录：`actual` 先记「中继」，升级成功后补字段（比如 `upgraded_after_ms`），别把「中继 → 直连」记成预测错。
+    - netns 里中继不限速，看不出提速，验证以日志里的「升级到直连」和之后的连接地址为准；可参照 `p2pcp-test.sh` 的 `t_upgrade`（隧道版）写 `t_xferup`。
 - [ ] **8. 收尾。** 总览的 `preflight` 和所有 planned 节点转成正式节点并补上 `@src`；docs/09 加一节「先体检、再直传」；PROGRESS 加一条；顺便把地图同步到当前 HEAD（落后的 6 个提交）。
   - 验证：`check.py` 退出码 0，没有 planned 节点；`go test ./p2pcp/` 和 `p2pcp-test.sh` 全过。

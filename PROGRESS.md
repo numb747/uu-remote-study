@@ -106,6 +106,16 @@
 - **决定：继续研究 p2pcp**（每一层都自己懂）。待办放在前面：借鉴 sendme 的「先走中继、再升级直连」，以及中继走 TCP 443。
 - 99-server 上留下的东西：iroh-relay 1.5.0 在 `/opt/iroh-relay/`（配置和 token 只有 root 能读），用 `systemd-run` 临时单元 `iroh-relay-test` 跑（`RuntimeMaxSec=1d`，重启服务器后不会再起来）；snap 版 certbot 5.10 和 Let's Encrypt IP 证书 `/etc/letsencrypt/live/8.140.18.211/`（6 天，自动续期，续期时临时占用 TCP 80）；安全组新开了 UDP 7842（iroh 的 QAD 用）。
 
+### 0.5.11 p2pcp「先体检、再直传」：第 1~6 步完成（2026-11-21，交接）
+- **设计和进度都在 [docs/arch/DESIGN.md](docs/arch/DESIGN.md)**（25 条决策、8 步实现顺序，每步附验证结果），图 26-flow-preflight / 33-nat-profile。新会话从「实现顺序」里第一个没勾的步骤接着做，已定的事不再讨论。
+- 已完成：本机 NAT 画像（公开 STUN 测映射 + 会合服务器 `/FT` 测过滤，分 open / cone / port / sym，按网络缓存 30 分钟）→ 经 `/R2` 的 `nat=` 标志交换 → 4×4 矩阵预测 → 预测打不通时一轮不通就走中继 → 传输结束打结果行、写 `~/.cache/p2pcp/history.jsonl`、`-progress` 输出 `@CHECK` → `p2pcp check -room 名字`（两端各跑一次，双端体检报告）。
+- 途中修掉的原有问题（都有 netns 用例或对照）：两端打洞轮次错位（port ↔ port 偶发 15 秒被迫走中继）；进中继时立刻注销导致对方找不到（中继偶发 10~14 秒）；cone ↔ sym 只补发一次 /PP 的竞态；非发起方吞掉 QUIC Initial（docs/13 那次「打洞 118ms、握手 4.4s」）。
+- **下一步：第 7 步「走中继时后台打洞，打通就升级到直连」**，要点已写进 DESIGN 第 7 步；然后第 8 步收尾。
+- 部署状态：99-server 的 `uu-rendezvous` 是带 `/FT` 的版本（旧版 `.v2` 备份）；电脑 `p2p-direct` 服务和手机 App 是**第 5 步**的版本（第 6 步的 /PN 修复还没装，第 8 步重装：电脑 `apps/pc/install.sh`，App `apps/android/build.sh install`，要在手机上点确认，装之前 `adb shell input keyevent KEYCODE_WAKEUP; adb shell svc power stayon usb`，装完 `svc power stayon false` 恢复）。
+- 99-server 上对比实测留下的：iroh-relay 临时单元 `iroh-relay-test` 到 **2026-11-22 08:26 自动停止**；snap 版 certbot 和 IP 证书（11-27 到期，自动续期，续期时占 TCP 80）；安全组 UDP 7842。要不要清理还没定。
+- 提交都在本地 `main`，**还没推送**（仓库是公开的；已确认没有密钥）。
+- 干活的小坑：zsh 不拆 `$var`，循环里用 `bash -c`；netns 跑法 `lab/netns/lab.sh script <natA> <natB> p2pcp-test.sh`，`TESTS=`、`KEEP_LOGS=1`，sym ↔ sym 的 resume / reconn / tunnel 按直连设计、改动前就失败；nft 链名别用 `fwd`（保留字），匹配 UDP 写 `meta l4proto udp`；手机测试用 `adb push` 到 `/data/local/tmp/p2pcp`，带 `XDG_CACHE_HOME=/data/local/tmp/cache`；PC 开着 sing-box TUN，一律 `-bind auto`。
+
 ### 0.6 换到有 IPv6 的新电脑后，第一步
 ```bash
 ip -6 addr show scope global          # 有 2xxx: 开头的地址 = 有全球单播 IPv6
