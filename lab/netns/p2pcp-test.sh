@@ -10,6 +10,9 @@
 #   reconn   传到一半路径断 20 秒，发送端自己重连续传
 #   tunnel   expose/forward 回显；中途三次把 forward 正在用的 UDP 端口封掉，每次都迁移到新洞上，TCP 会话不断
 #   upgrade  forward 先强制走中继，15 秒后自己打通直连并迁移过去，TCP 会话不断
+#   preflight 体检：两端的画像（按 $NAT_A / $NAT_B 核对类别）和组合预测，再传一个小文件
+#   desync   人为让两端的打洞轮次错开（B 晚 1.5 秒拿到 /P，前 4.5 秒 A→B 直连全丢）：B 应从重推的 /P 学到 A 的新地址，
+#            或者看到 A 的 relay 标志中途跟进中继，而不是各打满各的一轮（放在 preflight 之后跑，要用它留下的画像缓存）
 #
 # 宇宙里：peerA 10.0.1.2（NAT A 后）发送 / forward，peerB 10.0.2.2（NAT B 后）接收 / expose，会合服务器 192.0.2.1。
 set -uo pipefail
@@ -17,7 +20,7 @@ B=$BIN_DIR
 W=$(mktemp -d /tmp/p2pcp-test.XXXX)
 SRV=192.0.2.1:7001,192.0.2.1:7000
 ROOM=lab-$RANDOM-$RANDOM
-TESTS=${TESTS:-send resume reconn tunnel upgrade}
+TESTS=${TESTS:-preflight desync send resume reconn tunnel upgrade}
 A() { ip netns exec peerA "$@"; }
 Bn() { ip netns exec peerB "$@"; }
 # 后台跑：$! 就是 p2pcp 进程本身（ip netns exec 会 exec 过去），kill 得到
@@ -31,6 +34,24 @@ ip netns exec inet "$B/punch" server -listen 192.0.2.1:7000,192.0.2.1:7001 -rela
 # 收尾：不管哪一步出错，后台进程都杀掉
 trap 'kill $(jobs -p) 2>/dev/null' EXIT
 SRVPID=$!
+# 体检用的 STUN：inet 上再加两个 IP，各起一个最小 STUN 应答端（绑定具体 IP，回包的源地址才对得上，
+# restricted / port 型 NAT 才放得进来）。所有用例都用它们，不去碰公开 STUN
+cat >"$W/stun.py" <<'EOF'
+import socket, struct, sys
+s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM); s.bind((sys.argv[1], 3478))
+while True:
+    b, (ip, port) = s.recvfrom(1500)
+    if len(b) < 20 or b[0:2] != b"\x00\x01": continue
+    x = struct.pack("!HH", 0x0001, port ^ 0x2112) + bytes(a ^ c for a, c in zip(socket.inet_aton(ip), b"\x21\x12\xa4\x42"))
+    s.sendto(struct.pack("!HH", 0x0101, 12) + b[4:20] + struct.pack("!HH", 0x0020, 8) + x, (ip, port))
+EOF
+for ip in 192.0.2.2 192.0.2.3; do
+	ip -n inet addr add $ip/32 dev lo
+	ip netns exec inet python3 "$W/stun.py" $ip &
+done
+export P2PCP_STUN=192.0.2.2:3478,192.0.2.3:3478
+export XDG_CACHE_HOME=$W/cache # 画像缓存放这里，不碰真实的 ~/.cache/p2pcp（两端共用一个文件，按指纹分条）
+
 # 把沿途 ARP 先解析好
 A ping -c1 -W1 192.0.2.1 >/dev/null 2>&1
 Bn ping -c1 -W1 192.0.2.1 >/dev/null 2>&1
@@ -59,6 +80,93 @@ else:
         time.sleep(0.3)
     print(f"echo ok n={n} maxgap={gap:.1f}s")
 EOF
+
+# 按 lab.sh 的 NAT 类型推本端画像应报的类别：full / restricted 过滤宽松 → cone，port → port，sym → sym
+want_class() { case $1 in full | restricted) echo cone ;; *) echo "$1" ;; esac; }
+
+t_preflight() {
+	echo "== preflight：画像 + 组合预测 + 缓存（natA=$NAT_A natB=$NAT_B）"
+	echo hi >"$W/pf.txt"
+	local ca cb want pa pb t1 t2 t3
+	ca=$(want_class "$NAT_A") cb=$(want_class "$NAT_B")
+	case "$ca/$cb" in sym/sym | sym/port | port/sym) want=打不通 ;; *) want=能直连 ;; esac
+	# 第 1 轮：接收端先挂着（像 daemon），两端都现测画像。发送端一定拿得到接收端的画像；
+	# 接收端拿不拿得到发送端的，要看打洞是不是比发送端的体检慢（体检和会合并行）
+	pf_round 1 1
+	grep -q "体检  本机 $ca " "$W/pf1-send.log" && ok "A 画像 $ca" || bad "A 画像不对：$(grep -o '体检  本机.*' "$W/pf1-send.log")"
+	grep -q "体检  本机 $cb " "$W/pf1-recv.log" && ok "B 画像 $cb" || bad "B 画像不对：$(grep -o '体检  本机.*' "$W/pf1-recv.log")"
+	pa=$(grep -o '→ 预测[^：]*' "$W/pf1-send.log" | head -1)
+	[[ $pa == "→ 预测$want" ]] && ok "第 1 轮 A 预测「$want」；B：$(grep -o '体检  .*预测[^：]*' "$W/pf1-recv.log" | sed 's/.*预测/预测/' | head -1)" || bad "第 1 轮 A 预测不对：「$pa」，应为 $want"
+	cmp -s "$W/pf.txt" "$W/pfout1/pf.txt" && ok "文件照常传到（$(grep -o '连上 [^，]*' "$W/pf1-send.log" | head -1)）" || bad "文件没传到"
+	# 第 2 轮：两端都命中缓存，第一次注册就带上 nat=，两端都能预测
+	pf_round 2 0.3
+	grep -q "体检  本机 $ca .*缓存" "$W/pf2-send.log" && grep -q "体检  本机 $cb .*缓存" "$W/pf2-recv.log" && ok "第 2 轮两端都用了缓存" || bad "第 2 轮没用缓存"
+	pa=$(grep -o '→ 预测[^：]*' "$W/pf2-send.log" | head -1) pb=$(grep -o '→ 预测[^：]*' "$W/pf2-recv.log" | head -1)
+	[[ $pa == "→ 预测$want" && $pb == "→ 预测$want" ]] && ok "第 2 轮两端都预测「$want」" || bad "第 2 轮预测不对：A「$pa」B「$pb」，应为 $want"
+	# 第 3 轮：-stun off 当对照。体检和会合并行，不该拖慢建连
+	pf_round 3 0.3 -stun off
+	grep -q 体检 "$W/pf3-send.log" && bad "-stun off 还在体检" || ok "-stun off 不体检"
+	t1=$(conn_ms "$W/pf1-send.log") t2=$(conn_ms "$W/pf2-send.log") t3=$(conn_ms "$W/pf3-send.log")
+	# 走中继的组合要等两轮打洞超时，还有偶发的轮次错位（DESIGN 待定），时间抖得厉害，只比直连的
+	if [[ $want != 能直连 ]]; then
+		# 预测打不通：一轮不通就请求中继，接收端在打洞中途看到对方的 relay 标志就跟过去（第 4 步）
+		grep -q '体检预测打不通，这一轮直接请求中继' "$W/pf2-send.log" && ((t2 < 6000)) &&
+			ok "预测打不通 → 一轮就走中继：现测画像 ${t1}ms，缓存 ${t2}ms，不体检 ${t3}ms" ||
+			bad "没有一轮就走中继：现测 ${t1}ms，缓存 ${t2}ms，不体检 ${t3}ms"
+		echo "  · B 怎么进的中继：$(grep -ho '[^ ]*改走中继[^（]*' "$W/pf2-recv.log" "$W/pf3-recv.log" | tr '\n' ' ')"
+	elif ((t1 - t3 < 200 && t2 - t3 < 200)); then ok "建连：现测画像 ${t1}ms，缓存 ${t2}ms，不体检 ${t3}ms"
+	else bad "体检拖慢了建连：现测 ${t1}ms，缓存 ${t2}ms，不体检 ${t3}ms"; fi
+}
+
+t_desync() {
+	echo "== desync：两端轮次错开时的同步（natA=$NAT_A natB=$NAT_B）"
+	local ca cb want t
+	ca=$(want_class "$NAT_A") cb=$(want_class "$NAT_B")
+	case "$ca/$cb" in sym/sym | sym/port | port/sym) want=打不通 ;; *) want=能直连 ;; esac
+	mkdir -p "$W/dsout"
+	bgB "$B/p2pcp" recv -server "$SRV" -room "$ROOM.ds" -o "$W/dsout" -timeout 40s >"$W/ds-recv.log" 2>&1
+	local r=$!
+	sleep 1
+	# B 收不到 /P（UDP 载荷以 "/P " 开头）1.5 秒：它的打洞晚 1.5 秒开始
+	ip netns exec natB nft add table ip dsync
+	ip netns exec natB nft add chain ip dsync blk '{ type filter hook forward priority -10; }'
+	ip netns exec natB nft add rule ip dsync blk ip saddr 192.0.2.1 ip daddr 10.0.2.2 meta l4proto udp @th,64,24 0x2f5020 drop
+	# A 往 B 公网地址的包 4.5 秒内全丢：第一轮必然打不通
+	ip netns exec natA nft add table ip dsync
+	ip netns exec natA nft add chain ip dsync blk '{ type filter hook forward priority -10; }'
+	ip netns exec natA nft add rule ip dsync blk ip saddr 10.0.1.2 ip daddr 198.51.100.2 meta l4proto udp drop
+	(sleep 1.5; ip netns exec natB nft delete table ip dsync) &
+	(sleep 4.5; ip netns exec natA nft delete table ip dsync) &
+	A "$B/p2pcp" send -server "$SRV" -room "$ROOM.ds" "$W/pf.txt" >"$W/ds-send.log" 2>&1
+	wait $r
+	t=$(conn_ms "$W/ds-send.log")
+	cmp -s "$W/pf.txt" "$W/dsout/pf.txt" && ok "文件传到（$(grep -o '连上 [^，]*' "$W/ds-send.log" | head -1)）" || bad "文件没传到"
+	if [[ $want == 能直连 ]]; then
+		# 修之前：B 对着 A 第一轮关掉的端口打到 5.5 秒，下一轮才通
+		((t > 4000 && t < 5200)) && ! grep -q 中继 "$W/ds-send.log" && ok "封锁一解除就直连了：${t}ms（B 学到了 A 新一轮的地址）" ||
+			bad "没有及时直连：${t}ms，$(grep -o '连上 [^，]*' "$W/ds-send.log" | head -1)"
+	else
+		# 修之前：B 打满自己那一轮（到 5.5 秒）才看到 relay 标志
+		grep -q '对方已改走中继' "$W/ds-recv.log" && ((t > 3000 && t < 5200)) && ok "B 打洞中途跟进了中继：$(grep -o '对方已改走中继[^，]*' "$W/ds-recv.log")，A ${t}ms" ||
+			bad "B 没有中途跟进中继：A ${t}ms，B：$(grep -o '[^ ]*改走中继[^（]*' "$W/ds-recv.log")"
+	fi
+}
+
+pf_round() { # <序号> <接收端先等几秒> [额外参数]：接收端先挂着，再让发送端发一个小文件
+	local n=$1 lead=$2
+	shift 2
+	bgB "$B/p2pcp" recv -server "$SRV" -room "$ROOM.pf$n" -o "$W/pfout$n" -timeout 30s "$@" >"$W/pf$n-recv.log" 2>&1
+	local r=$!
+	sleep "$lead"
+	A "$B/p2pcp" send -server "$SRV" -room "$ROOM.pf$n" "$@" "$W/pf.txt" >"$W/pf$n-send.log" 2>&1
+	wait $r
+}
+
+# 发送端日志里从第一行（连接对方）到「已连上」的毫秒数
+conn_ms() {
+	awk '{ split($1, t, ":"); ms = (t[1] * 3600 + t[2] * 60 + t[3]) * 1000 }
+		NR == 1 { s = ms } /已连上/ { printf "%d", ms - s; exit }' "$1"
+}
 
 t_send() {
 	echo "== send：两个文件，-conns 2 共用一个洞"

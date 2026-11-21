@@ -15,7 +15,7 @@
 #   lab.sh matrix [选项]              所有 NAT 组合各跑 --repeat 次，输出成功矩阵
 #   lab.sh shell <natA> <natB> [选项] 搭好后进交互 shell，自己 ip netns exec peerA ...
 #   lab.sh script <natA> <natB> <脚本> [选项]  搭好后在宇宙里执行脚本（p2pcp 测试用，见 p2pcp-test.sh），
-#                                     脚本里可用 $BIN_DIR/{punch,p2pcp}，会合服务器地址 192.0.2.1
+#                                     脚本里可用 $BIN_DIR/{punch,p2pcp}、$NAT_A / $NAT_B（两端 NAT 类型），会合服务器地址 192.0.2.1
 #   lab.sh xfer <own|quic|tcp> [选项]  传输层测试：peerA（NAT 后）发帧流给 inet 上的接收端，
 #                                     弱网用 --netem-a 加在 A 的接入链路上，xfer 参数用 --xfer-args 传
 #
@@ -155,7 +155,7 @@ inner() {
 	case $mode in
 	run) run_punch "$bin" "$log" "$t" "$spray" ;;
 	xfer) run_xfer "$log" ;;
-	script) BIN_DIR=$(dirname "$bin") bash "$SCRIPT" ;;
+	script) BIN_DIR=$(dirname "$bin") NAT_A=$ta NAT_B=$tb bash "$SCRIPT" ;;
 	shell)
 		echo "实验宇宙已就绪：natA=$ta natB=$tb。命名空间: inet natA natB peerA peerB"
 		echo "  会合服务器: ip netns exec inet $bin server -listen 192.0.2.1:7000"

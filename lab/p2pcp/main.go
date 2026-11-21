@@ -87,6 +87,8 @@ type opts struct {
 	listen   string        // forward：本地监听地址
 	timeout  time.Duration // 等对方的超时，0 = 一直等（daemon）
 	regEvery time.Duration // 注册间隔
+	stun     string        // 体检用的公开 STUN，逗号分隔；off = 不体检
+	pre      *preflight    // 这次 connect 的体检（connect 里填）
 	rep      *reporter
 }
 
@@ -112,6 +114,11 @@ func main() {
 	fs.BoolVar(&o.only6, "6", false, "只走 IPv6（两端都要有全局 IPv6）")
 	fs.IntVar(&o.conns, "conns", 2, "发送端：并行 QUIC 连接数（共用一个打通的洞；BBR 下 1~2 条就能跑满，docs/09 第 7 节）")
 	fs.StringVar(&o.relay, "relay", "auto", "打不通时走会合服务器上的中继：auto（发送端两轮打不通才用）| off | always（测试用）")
+	stunDef := defaultSTUN
+	if s := os.Getenv("P2PCP_STUN"); s != "" {
+		stunDef = s
+	}
+	fs.StringVar(&o.stun, "stun", stunDef, "体检用的公开 STUN（IP:端口，逗号分隔，至少两台、IP 不同）；off = 不体检。也认环境变量 P2PCP_STUN")
 	fs.StringVar(&o.cc, "cc", "bbr", "发送端：拥塞控制 bbr | cubic | brutal:45M（见 cc.go）")
 	fs.StringVar(&o.out, "o", ".", "接收端：保存目录")
 	fs.StringVar(&o.to, "to", "127.0.0.1:22", "expose：对方开的每条流都接到这个 TCP 地址")

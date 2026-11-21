@@ -35,6 +35,7 @@ type session struct {
 	server  *net.UDPAddr // 这次用的会合服务器（连接迁移时继续用它）
 	relayed bool
 	took    time.Duration // 从开始注册到打通（含重试）
+	pre     *preflight    // 这次的体检（-stun off 时为 nil）
 }
 
 func (s *session) via() string {
@@ -60,6 +61,9 @@ func randHex(n int) string {
 // 也只是多花一轮。哪个地址打通过就记住，下次从它开始。
 func connect(o opts, rid, role string) (*session, error) {
 	const attempts = 6
+	if o.stun != "off" && o.stun != "" {
+		o.pre = startPreflight(o) // 后台测，不等；传输会话结束时 settle（preflight.go）
+	}
 	servers := strings.Split(o.server, ",")
 	first := int(goodServer.Load())
 	start := time.Now()
@@ -70,11 +74,18 @@ func connect(o opts, rid, role string) (*session, error) {
 	)
 	for i := range attempts {
 		k := (first + i) % len(servers)
-		// 发送端两轮打不通就请求中继（接收端看到对方的标志会跟着去）
-		relay := o.relay == "always" || o.relay == "auto" && role == "send" && punchTOs >= 2
+		// 发送端两轮打不通就请求中继（接收端看到对方的标志会跟着去，打洞中途也会跟）；
+		// 体检预测打不通时，一轮不通就请求（DESIGN 决策 2：仍短打一轮，万一预测错了还能直连）
+		early := punchTOs == 1 && o.pre.predictedNo()
+		relay := o.relay == "always" || o.relay == "auto" && role == "send" && (punchTOs >= 2 || early)
+		if relay && early && o.relay == "auto" {
+			log.Print("体检预测打不通，这一轮直接请求中继")
+		}
 		var s *session
 		if s, err = connectOnce(o, servers[k], rid, id, relay); err == nil {
 			s.took = time.Since(start)
+			s.pre = o.pre
+			o.pre.setActual(s.relayed)
 			goodServer.Store(int32(k))
 			if i > 0 {
 				log.Printf("第 %d 轮才连上（会合 %s）", i+1, servers[k])
@@ -163,18 +174,45 @@ func connectOnce(o opts, server, rid, id string, wantRelay bool) (*session, erro
 	if c6 != nil {
 		cands = strings.TrimSuffix(c6.LocalAddr().String()+","+cands, ",-")
 	}
-	flags := "-"
-	if wantRelay {
-		flags = "relay"
+	// 每次注册现拼：本机画像在后台测，出来之后的注册才带得上 nat=
+	reg := func() []byte {
+		var fl []string
+		if wantRelay {
+			fl = append(fl, "relay")
+		}
+		if f := o.pre.flag(); f != "" {
+			fl = append(fl, f)
+		}
+		flags := "-"
+		if len(fl) > 0 {
+			flags = strings.Join(fl, ",")
+		}
+		return []byte(fmt.Sprintf("/R2 %s %s %s %s", rid, id, cands, flags))
 	}
-	reg := fmt.Sprintf("/R2 %s %s %s %s", rid, id, cands, flags)
 	unreg := func() {
 		for range 2 {
 			c.WriteToUDP([]byte("/U2 "+rid+" "+id), srv)
 		}
 	}
 
-	// 1. 注册，等 PEER
+	// parseCands：/P 里对方的公网映射 + 自报候选，按本端开了哪些 socket 过滤
+	parseCands := func(pub, cands string) []*net.UDPAddr {
+		var out []*net.UDPAddr
+		for _, s := range append([]string{pub}, strings.Split(cands, ",")...) {
+			a, err := net.ResolveUDPAddr("udp", s)
+			if err != nil || a.IP == nil {
+				continue
+			}
+			if v4 := a.IP.To4() != nil; v4 && o.only6 || !v4 && c6 == nil {
+				continue
+			}
+			out = append(out, a)
+		}
+		return out
+	}
+
+	// 1. 注册，等 PEER。第一次注册前给画像 50ms：命中缓存时这就够了，第一次注册就带得上 nat=
+	o.pre.wait(50 * time.Millisecond)
 	var (
 		peerCands []*net.UDPAddr
 		peerID    string
@@ -183,9 +221,10 @@ func connectOnce(o opts, server, rid, id string, wantRelay bool) (*session, erro
 	buf := make([]byte, 1500)
 	start := time.Now()
 	var (
-		lastReg time.Time
-		lastYou time.Time
-		mapped  *net.UDPAddr // 会合服务器回执里的本方公网映射
+		lastReg   time.Time
+		regHadNat bool // 上一次注册带没带 nat=
+		lastYou   time.Time
+		mapped    *net.UDPAddr // 会合服务器回执里的本方公网映射
 	)
 	for peerID == "" {
 		if mapped == nil && time.Since(start) > 2*time.Second {
@@ -203,11 +242,16 @@ func connectOnce(o opts, server, rid, id string, wantRelay bool) (*session, erro
 			closeAll()
 			return nil, fmt.Errorf("等了 %v，对方没有上线（两端的 p2pcp 版本要一致：v2 起会合协议变了）", o.timeout)
 		}
-		if time.Since(lastReg) >= o.regEvery {
-			c.WriteToUDP([]byte(reg), srv)
-			lastReg = time.Now()
+		// 画像一测好就补一次注册，不等下一个周期（daemon 是 5 秒）：服务器存的是最近一次注册，对方这时来就能拿到 nat=
+		if f := o.pre.flag(); time.Since(lastReg) >= o.regEvery || f != "" && !regHadNat {
+			c.WriteToUDP(reg(), srv)
+			lastReg, regHadNat = time.Now(), f != ""
 		}
-		c.SetReadDeadline(time.Now().Add(500 * time.Millisecond))
+		wake := 500 * time.Millisecond
+		if o.pre != nil && !regHadNat {
+			wake = 50 * time.Millisecond // 画像还没带上：勤看着点，测好了马上补注册
+		}
+		c.SetReadDeadline(time.Now().Add(wake))
 		for {
 			n, from, err := c.ReadFromUDP(buf)
 			if err != nil {
@@ -234,16 +278,8 @@ func connectOnce(o opts, server, rid, id string, wantRelay bool) (*session, erro
 			}
 			peerID = f[1]
 			useRelay = useRelay || slices.Contains(strings.Split(f[4], ","), "relay")
-			for _, s := range append([]string{f[2]}, strings.Split(f[3], ",")...) {
-				a, err := net.ResolveUDPAddr("udp", s)
-				if err != nil || a.IP == nil {
-					continue
-				}
-				if v4 := a.IP.To4() != nil; v4 && o.only6 || !v4 && c6 == nil {
-					continue
-				}
-				peerCands = append(peerCands, a)
-			}
+			o.pre.sawPeer(f[4])
+			peerCands = parseCands(f[2], f[3])
 			break
 		}
 	}
@@ -252,7 +288,7 @@ func connectOnce(o opts, server, rid, id string, wantRelay bool) (*session, erro
 	// 注销还是要的：否则服务器在 30 秒内还会把这次的旧地址推给下一次注册的人
 	controlling := strings.HasPrefix(id, "send.")
 
-	if useRelay {
+	goRelay := func(why string) (*session, error) {
 		unreg()
 		if c6 != nil {
 			c6.Close()
@@ -268,8 +304,11 @@ func connectOnce(o opts, server, rid, id string, wantRelay bool) (*session, erro
 			c.Close()
 			return nil, err
 		}
-		log.Printf("打洞不通，改走中继 %s（%v）", relay, time.Since(t0).Round(time.Millisecond))
+		log.Printf("%s，改走中继 %s（%v）", why, relay, time.Since(t0).Round(time.Millisecond))
 		return &session{conn: c, peer: relay, server: srv, relayed: true}, nil
+	}
+	if useRelay {
+		return goRelay("打洞不通")
 	}
 	if len(peerCands) == 0 {
 		unreg()
@@ -289,8 +328,21 @@ func connectOnce(o opts, server, rid, id string, wantRelay bool) (*session, erro
 		mu       sync.Mutex
 		chosen   *net.UDPAddr
 		chosenOn *net.UDPConn
+		learned  []*net.UDPAddr // 从对方入包学到的地址（peer-reflexive）、对方新一轮的地址，也往这里打
 		done     = make(chan struct{})
+		// 对方在重推的 /P 里带了 relay：它已经改走中继了，别再等这一轮超时（以前各按各的超时推进，
+		// 一端已经在中继上等、另一端还在打洞，白等 4~6 秒，DESIGN 待定「轮次错位」）
+		relayNow  = make(chan struct{})
+		relayOnce sync.Once
+		stop      atomic.Bool // 改走中继前让 listen 都退出，免得和 joinRelay 抢包
+		lwg       sync.WaitGroup
 	)
+	addLearned := func(a *net.UDPAddr) { // 调用方持有 mu
+		if !slices.ContainsFunc(peerCands, func(b *net.UDPAddr) bool { return sameAddr(a, b) }) &&
+			!slices.ContainsFunc(learned, func(b *net.UDPAddr) bool { return sameAddr(a, b) }) {
+			learned = append(learned, a)
+		}
+	}
 	choose := func(c *net.UDPConn, from *net.UDPAddr) {
 		mu.Lock()
 		if chosen == nil {
@@ -300,23 +352,45 @@ func connectOnce(o opts, server, rid, id string, wantRelay bool) (*session, erro
 		mu.Unlock()
 	}
 	listen := func(c *net.UDPConn) {
+		defer lwg.Done()
 		buf := make([]byte, 1500)
 		triggered := map[string]bool{}
-		for {
+		for !stop.Load() {
 			c.SetReadDeadline(deadline)
 			n, from, err := c.ReadFromUDP(buf)
-			if err != nil {
+			if err != nil || stop.Load() {
 				return
 			}
 			if os.Getenv("P2PCP_DEBUG") != "" {
 				log.Printf("收到 %q 来自 %s", buf[:min(n, 16)], from)
 			}
 			switch string(buf[:min(n, 3)]) {
+			case "/P ": // 服务器重推的对方信息（双方打洞期间每 500ms 注册一次，每次都推）
+				if from.IP.Equal(srv.IP) && from.Port == srv.Port {
+					if f := strings.Fields(string(buf[:n])); len(f) == 5 && f[1] == peerID {
+						o.pre.sawPeer(f[4]) // 对方的画像可能这时才带上
+						if slices.Contains(strings.Split(f[4], ","), "relay") {
+							relayOnce.Do(func() { close(relayNow) })
+						}
+						// 对方已经换了新 socket（它那边这一轮先超时了）：新地址也打上，别对着它关掉的旧端口打满 4 秒
+						mu.Lock()
+						for _, a := range parseCands(f[2], f[3]) {
+							addLearned(a)
+						}
+						mu.Unlock()
+					}
+				}
 			case msgPunch:
 				c.WriteToUDP(pktAck, from)
 				if !triggered[from.String()] {
 					triggered[from.String()] = true
 					c.WriteToUDP(pktPunch, from)
+					// 入包的源地址不在候选里 = 对方是对称型、给我们换了新端口（peer-reflexive）。记下来，之后每 20ms
+					// 都往这里打：只补发一次的话，对方收到我们的 /PA 就停止收包，紧跟着到的这一个 /PP 没人应，
+					// 我们就永远等不到 /PA（cone ↔ sym 偶发打不通，2026-11-21 netns 抓到）
+					mu.Lock()
+					addLearned(from)
+					mu.Unlock()
 				}
 			case msgAck:
 				if !waitNom {
@@ -337,20 +411,43 @@ func connectOnce(o opts, server, rid, id string, wantRelay bool) (*session, erro
 		}
 	}
 	if !o.only6 { // -6 时 IPv4 socket 只管会合，别应答打洞（否则对方的触发检查会把路径拉回 IPv4）
+		lwg.Add(1)
 		go listen(c)
 	}
 	if c6 != nil {
+		lwg.Add(1)
 		go listen(c6)
+	}
+	// stopListeners 让 listen 都退出：它们每轮会把读超时设回 deadline，所以要反复踢，直到都退出
+	stopListeners := func() {
+		stop.Store(true)
+		exited := make(chan struct{})
+		go func() { lwg.Wait(); close(exited) }()
+		for {
+			c.SetReadDeadline(time.Now())
+			if c6 != nil {
+				c6.SetReadDeadline(time.Now())
+			}
+			select {
+			case <-exited:
+				c.SetReadDeadline(time.Time{})
+				return
+			case <-time.After(10 * time.Millisecond):
+			}
+		}
 	}
 	tick := time.NewTicker(20 * time.Millisecond)
 	defer tick.Stop()
 	lastReg = time.Now()
 	for {
 		if time.Since(lastReg) >= 500*time.Millisecond {
-			c.WriteToUDP([]byte(reg), srv)
+			c.WriteToUDP(reg(), srv)
 			lastReg = time.Now()
 		}
-		for _, a := range peerCands {
+		mu.Lock()
+		targets := append(slices.Clip(peerCands), learned...)
+		mu.Unlock()
+		for _, a := range targets {
 			via := c
 			if a.IP.To4() == nil {
 				via = c6
@@ -376,6 +473,9 @@ func connectOnce(o opts, server, rid, id string, wantRelay bool) (*session, erro
 			}
 			chosenOn.SetReadDeadline(time.Time{})
 			return &session{conn: chosenOn, peer: chosen, server: srv, took: time.Since(punchStart)}, nil
+		case <-relayNow:
+			stopListeners()
+			return goRelay(fmt.Sprintf("对方已改走中继（打洞 %v 时）", time.Since(punchStart).Round(time.Millisecond)))
 		case <-tick.C:
 		}
 		if time.Now().After(deadline) {
@@ -462,21 +562,9 @@ func lanCands(o opts, port int) string {
 // defaultRouteIP 返回 main 路由表里默认路由那块网卡的 IPv4 地址（读 /proc/net/route，它只列 main 表）。
 // 开着 sing-box 这类 TUN 代理时，代理的默认路由在别的策略路由表里，main 表的默认路由仍是物理网卡，正好是打洞要绑的那块
 func defaultRouteIP() net.IP {
-	b, err := os.ReadFile("/proc/net/route")
-	if err != nil {
+	best, _ := defaultRoute()
+	if best == "" {
 		return nil
-	}
-	best, bestMetric := "", 1<<30
-	for _, line := range strings.Split(string(b), "\n")[1:] {
-		f := strings.Fields(line)
-		if len(f) < 8 || f[1] != "00000000" || f[7] != "00000000" {
-			continue
-		}
-		var metric int
-		fmt.Sscan(f[6], &metric)
-		if metric < bestMetric {
-			best, bestMetric = f[0], metric
-		}
 	}
 	ifc, err := net.InterfaceByName(best)
 	if err != nil {

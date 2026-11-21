@@ -144,6 +144,7 @@ func sendSession(o opts, files *[]string) (progressed bool, err error) {
 		return false, err
 	}
 	defer l.close()
+	defer l.pre.settle() // defer 后进先出，在 close 之前跑：体检的结论在传输结束时补齐（preflight.go）
 	logLinked(l)
 	o.rep.state("已连上 " + l.via())
 	if l.relayed {
@@ -490,6 +491,7 @@ func lockFID(fid string) (unlock func()) {
 // recvSession 处理一个发送端：除了第一条连接，对方还会在同一个洞上开别的连接，都在后台接着；
 // 每条连接上的单向流是数据块，写进当前文件
 func recvSession(o opts, l *link) error {
+	defer l.pre.settle() // 体检的结论在传输结束时补齐（preflight.go）
 	defer l.close()
 	logLinked(l)
 	o.rep.state("已连上 " + l.via())
