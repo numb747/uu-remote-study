@@ -7,13 +7,13 @@ flowchart LR
     osint["系统集成 ×3：开机自启（启动文件夹 / LaunchAgent / systemd）、右键发送（发送到 / Dolphin）、通知"]:::planned
   end
   subgraph core["lab/p2pcp（Go，四个平台共用）"]
-    cli["新命令：id / invite / join / contacts / send -to / serve；二维码 rsc.io/qr"]:::planned
-    serve["serve：同时听所有好友房间 + 未用的邀请，按好友分目录"]:::planned
-    pair["加好友：邀请码编解码、互换名片、配对密钥 HKDF(ECDH)<br/>contacts.go / pair.go"]:::planned
+    cli["新命令：id / invite / join / contacts / send -to / serve；二维码 rsc.io/qr（PNG / 终端）"]
+    serve["serve：同时听所有好友的收件房间 + 未用的邀请，按好友分目录"]
+    pair["加好友：邀请码编解码、互换名片、配对密钥 HKDF(ECDH)<br/>contacts.go / pair.go"]
     xfer["传文件：体检、打洞、续传、后台升级<br/>sendSession / recvSession"]
   end
-  identity["设备身份：X25519 私钥 + 设备名<br/>identity.json"]:::planned
-  store["通讯录<br/>contacts.json"]:::planned
+  identity["设备身份：X25519 私钥 + 设备名<br/>identity.json"]
+  store["通讯录：好友 + 待用邀请<br/>contacts.json"]
   rdv["会合 + 中继 99-server"]
   release["发布：GitHub Releases（APK 固定签名、Windows / macOS zip、Linux tar），启动时查新版本"]:::planned
 
@@ -35,6 +35,9 @@ flowchart LR
   release -.->|"下载安装"| me
 
 %% @src xfer lab/p2pcp/transfer.go func sendSession(
+%% @src cli lab/p2pcp/main.go case "invite":
+%% @src serve lab/p2pcp/pair.go func serve(o opts)
+%% @src pair lab/p2pcp/contacts.go func pairSecret(
 %% @src rdv lab/punch/main.go func runServer
 %% @link pair 27-flow-pairing.mmd
 %% @link xfer 24-flow-p2pcp.mmd

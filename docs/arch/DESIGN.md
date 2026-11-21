@@ -24,6 +24,10 @@
 12. **二维码在 Go 里生成**：引入 `rsc.io/qr`（小、BSD 许可），`p2pcp invite -qr <png>` 出图，安卓和网页都直接显示这张图。（默认）
 13. **发布：GitHub Releases**（仓库本来就是公开的）：安卓 APK 换成固定的发布签名（密钥只放本机并备份，不进仓库；现在每台机器各用自己的 debug 签名，朋友装了以后没法覆盖升级）、Windows zip、macOS zip、Linux tar + install.sh。App 和桌面版启动时查一次最新版本，有新版就提示。（默认）
 14. **协议兼容**：传文件仍是 ALPN `p2pcp/2`，旧版之间照常能传；新增的只有 `p2pcp-pair/1` 和本地文件格式。（默认）
+15. **收件房间按方向分（第 1 步冒烟测试抓到）**：最初两个方向共用一个配对房间，结果自己的 `send -to 好友` 和自己的 `serve` 在同一个房间里，会合服务器把它们配成一对，文件发给了自己（旧版两个方向各用 `.pc` / `.phone` 房间，所以没这个问题）。改成发给 X 的房间密钥 = `HMAC(配对密钥, "p2pcp inbox" ‖ X 的公钥)`（`inboxSecret`），每台设备的 `serve` 只听「发给自己」的那个；`check -to` 两端跑同一条命令，仍用不分方向的配对密钥。
+16. **邀请码只能用一次的顺序**：被邀请方先发名片；邀请方在通讯录的锁里把邀请作废、把对方加进去，成功了才回自己的名片，否则回拒绝原因。同一个码被两个人同时用，后到的那个拿不到名片、加不上。回完名片要等对方先关连接（最多 3 秒），否则还在路上的名片会被丢掉（冒烟测试抓到的 `Application error 0x0`）。
+17. **`join` 默认只等 20 秒**：邀请方在线时 1 秒内就配上；邀请码用过 / 过期后，邀请方的 `serve` 不再听那个房间，原来的 60 秒会让朋友干等 1 分钟（netns sym ↔ sym 抓到）。
+18. **`serve` 的实现**：每 2 秒看一次 `contacts.json` 的修改时间，按「公钥 + 会合地址 + 名字」决定多听 / 少听哪些房间（改名、换服务器会重开）；每个房间一个 `keepServing`，它现在能被 `o.quit` 叫停、`waiting` 为空时不刷状态。身份和通讯录读改写用跨平台的 `lockFile`（Unix 用 flock，Windows 用独占创建锁文件），画像缓存也换成了它，为第 4 步编 Windows 做准备（现在 Windows 还卡在 `syscall.Kill`）。
 
 ## 待定
 
@@ -42,7 +46,7 @@ iPhone、一对多 / 群发、账号和中心化的好友目录、网页版（�
 
 （草稿，等用户确认）
 
-- [ ] **1. 曳光弹：Linux 命令行上的通讯录。** `p2pcp id / invite / join / contacts / send -to / serve`，身份和通讯录存 `~/.config/p2pcp/`（Android 用 `-config` 指定目录）。
+- [x] **1. 曳光弹：Linux 命令行上的通讯录。**（2026-11-21：单元测试配对密钥两边一致、收件房间分方向、邀请码编解码（夹在别的字里、小写、截断、新版本）、通讯录增删找、互换名片和拒绝，`-race` 通过；netns `pair` 用例 port↔port、sym↔sym（走中继）、full↔sym 全过：加好友、第二次用被拒、互发按好友分目录、不会发给自己、删好友后发不进来；全部回归 port↔port、full↔sym 47/47，port↔sym、sym↔sym 只有已知的 tunnel 2 项失败；真实网络 PC ↔ 手机（Wi-Fi）加好友后各发 5MB，sha256 一致） `p2pcp id / invite / join / contacts / send -to / serve`，身份和通讯录存 `~/.config/p2pcp/`（Android 用 `-config` 指定目录）。
   - 节点：27 的 `inv_code`、`inv_wait`、`join`、`xchg`、`derive`、`store`、`serve`、`send_to`；34 的 `identity`、`store`、`cli`、`serve`。
   - 文件：新建 `lab/p2pcp/contacts.go`（身份、通讯录、配对密钥、邀请码编解码）、`pair.go`（`p2pcp-pair/1` 互换名片）；`main.go` 加子命令；`transfer.go` 的 `daemon` 改成 `serve` 多房间、按好友分目录。
   - 验证：单元测试（配对密钥两边一致、邀请码编解码、过期 / 用过作废）；netns 新用例 `pair`：A invite、B join、两边互发文件、按好友分目录、邀请码第二次用被拒。

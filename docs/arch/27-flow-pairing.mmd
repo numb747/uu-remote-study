@@ -1,17 +1,17 @@
 flowchart TD
-  inv_ui["A 点「邀请好友」<br/>p2pcp invite"]:::planned
-  inv_code["邀请码：会合地址 + 128 位一次性密钥，24 小时有效<br/>p2pcp://join/… 文字 / 二维码"]:::planned
+  inv_ui["A 点「邀请好友」<br/>p2pcp invite"]
+  inv_code["邀请码：会合地址 + 128 位一次性密钥，24 小时有效<br/>p2pcp://join/… 文字 / 二维码"]
   share["微信发文字 / 当面扫码"]
-  inv_wait["A 的常驻接收在邀请房间里等（和好友房间一起听）<br/>serve"]:::planned
-  join["B 粘贴邀请码或打开链接<br/>p2pcp join"]:::planned
+  inv_wait["A 的常驻接收在邀请房间里等（和好友房间一起听）<br/>serve"]
+  join["B 粘贴邀请码（前后带别的字也认）<br/>p2pcp join，默认等 20 秒"]
   rdv["会合 + 中继 8.140.18.211<br/>会合 7001 / 7000，中继 3478"]
   punch["会合 + 打洞，打不通走中继（和传文件同一套）<br/>connect"]
   quic["QUIC + 通道绑定认证：邀请密钥当房间密钥<br/>newLink / authConn"]
-  xchg["互换名片：设备名 + X25519 公钥<br/>ALPN p2pcp-pair/1"]:::planned
-  derive["两边各算配对密钥 = HKDF(ECDH)，邀请码作废<br/>pairSecret"]:::planned
-  store["通讯录：名字、公钥、会合地址<br/>~/.config/p2pcp/contacts.json"]:::planned
-  serve["常驻接收：每个好友一个配对房间，以 recv 注册；收到的按好友分目录<br/>serve"]:::planned
-  send_to["选好友发送：配对密钥当房间密钥，照常体检、打洞、传、后台升级<br/>send -to"]:::planned
+  xchg["互换名片：设备名 + X25519 公钥<br/>ALPN p2pcp-pair/1"]
+  derive["两边各算配对密钥 = HKDF(ECDH)；邀请方先在锁里作废邀请、加好友，才回名片（同一个码只能用一次）<br/>pairSecret / serveCards"]
+  store["通讯录：名字、公钥、会合地址<br/>~/.config/p2pcp/contacts.json"]
+  serve["常驻接收：每个好友听「发给我」的收件房间（配对密钥按方向再派生，免得自己发给自己），按好友分目录；每 2 秒看通讯录变没变<br/>serve / inboxSecret"]
+  send_to["选好友发送：进对方的收件房间，照常体检、打洞、传、后台升级<br/>send -to / resolveFriend"]
 
   inv_ui -->|"生成"| inv_code
   inv_code -->|"用户转交"| share
@@ -29,8 +29,15 @@ flowchart TD
   send_to -->|"经 connect"| punch
 
 %% @src rdv lab/punch/main.go func runServer
+%% @src inv_ui lab/p2pcp/pair.go func cmdInvite(
+%% @src inv_code lab/p2pcp/contacts.go func encodeInvite(
+%% @src inv_wait lab/p2pcp/pair.go func serveInvite(
+%% @src join lab/p2pcp/pair.go func cmdJoin(
+%% @src xchg lab/p2pcp/pair.go func serveCards(
+%% @src derive lab/p2pcp/contacts.go func pairSecret(
+%% @src serve lab/p2pcp/pair.go func serve(o opts)
+%% @src send_to lab/p2pcp/pair.go func resolveFriend(
 %% @src punch lab/p2pcp/rdv.go func connect(
 %% @src quic lab/p2pcp/link.go func newLink(
 %% @link punch 24-flow-p2pcp.mmd
 %% @link send_to 26-flow-preflight.mmd
-classDef planned stroke:#bb9af7,stroke-width:2px,stroke-dasharray:3 4
