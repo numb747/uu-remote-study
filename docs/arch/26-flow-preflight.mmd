@@ -1,6 +1,6 @@
 flowchart TD
   entry["入口：send / recv / daemon<br/>connect 开始时后台测画像，不等它"]
-  entry_check["check -room：两端各跑一次<br/>完整双端体检，不用缓存"]:::planned
+  entry_check["check -room：两端跑同一条命令，各取随机角色、id 大的发起；单独的房间号<br/>checkPair：画像现测、注册前等它测完"]
   profile["本机 NAT 画像：先查缓存，没命中才现测（约 600ms），在后台跑<br/>startPreflight / cachedProfile"]
   cache["画像缓存：按网络指纹分条，30 分钟过期，flock 合并写<br/>~/.cache/p2pcp/profile.json"]
   reg["会合 /R2：标志里带 nat=画像；第一次注册前最多等 50ms，画像一测好就补注册<br/>connectOnce，打洞时 listen 也收重推的 /P"]
@@ -11,7 +11,7 @@ flowchart TD
   relay["中继兜底<br/>joinRelay"]
   xfer["传输：QUIC 接管 + 通道绑定认证 + 4MB 分块续传<br/>dialPeer / sendSession"]
   upgrade["后台升级：走中继时隔一段再打洞，升级房间由 EKM 派生<br/>打通就在直连上重开会话，have 只报缺的块"]:::planned
-  pairtest["实测：打通后测 RTT / 丢包，再测中继<br/>checkPair"]:::planned
+  pairtest["实测：QUIC + 认证后双向互 ping 3 秒测 RTT / 丢包，再测中继，打完整报告<br/>pingPong / probeRelay"]
   report["结果行：实际路径、打洞 / 握手分开计时、预测对没对上；-progress 输出 @CHECK<br/>preflight.settle / resultLine"]
   history["预测记录，打洞失败也记<br/>~/.cache/p2pcp/history.jsonl"]
 
@@ -41,6 +41,8 @@ flowchart TD
 %% @src predict lab/p2pcp/predict.go func predict(me, peer profile)
 %% @src policy lab/p2pcp/rdv.go early := punchTOs == 1 && o.pre.predictedNo()
 %% @src report lab/p2pcp/preflight.go func (p *preflight) settle(
+%% @src entry_check lab/p2pcp/check.go func checkPair(
+%% @src pairtest lab/p2pcp/check.go func pingPong(
 %% @src rdv lab/punch/main.go func runServer
 %% @src punch lab/p2pcp/rdv.go func connectOnce(
 %% @src relay lab/p2pcp/rdv.go func joinRelay(

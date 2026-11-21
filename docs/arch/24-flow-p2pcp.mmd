@@ -11,7 +11,7 @@ flowchart TD
   subgraph pass["② 放行：打洞（IPv4、IPv6 同时）"]
     punch["每 20ms 向全部候选发 /PP；收到对方 /PP 回 /PA 并反发一次（触发检查）<br/>来源不在候选里（对方是对称型）、重推的 /P 里对方换了新地址，都加进目标一直打"]:::changed
     chosen["发送端：第一个 /PA 定路径<br/>用包的源地址作对端（prflx），关掉另一个 socket"]
-    nom["提名：发送端在选中路径上发 3 个 /PN<br/>接收端有两个 socket 时等 /PN 或首个 QUIC Initial"]
+    nom["提名：发起方在选中路径上发 3 个 /PN 再 Dial<br/>非发起方见到 /PN 或 QUIC Initial 就停（不再吞掉 Initial）"]:::changed
     retry["4 秒不通、坏端口或失联 → 换新端口、换下一个会合地址重来<br/>最多 6 轮，失败时分层诊断"]
     relay["发送端两轮打不通（预测打不通时一轮）：/R2 带 relay 标志，对方中途看到就跟；等凑齐时继续注册<br/>goRelay / joinRelay：/L 房间号.发送端id d|l → /LK"]:::changed
   end
