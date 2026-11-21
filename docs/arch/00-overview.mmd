@@ -3,7 +3,7 @@ flowchart LR
   subgraph product["P2P 直传"]
     apps["P2P 直传软件 ×2<br/>安卓 App + 电脑常驻服务（换网自动恢复）"]
     p2pcp["打洞直连核心 lab/p2pcp：断点续传 + 端口转发（换网迁移不断线）<br/>双栈打洞 + QUIC（BBR）+ 房间密钥通道绑定认证"]
-    rdv["会合 + 中继 8.140.18.211<br/>uu-rendezvous：会合 7000+7001（含 /FT 过滤测试应答），中继 UDP 3478（打不通时兜底）"]:::changed
+    rdv["会合 + 中继 8.140.18.211<br/>uu-rendezvous：会合 7000+7001（含 /FT 过滤测试应答），中继 UDP 3478（打不通时兜底）；收 p2pcp 的诊断上报 /H 写 reports.jsonl"]:::changed
     contacts["通讯录：设备密钥、邀请码加好友、好友之间的房间由 DH 派生（按方向分收件房间），serve 同时听所有好友<br/>invite / join / send -to / serve"]:::changed
     desk["桌面版 ×3（设计中）：Windows / macOS / Linux，本地网页界面 + 常驻接收 + 右键发送<br/>p2pcp app"]:::planned
     preflight["先体检、再直传：NAT 画像（按网络缓存）+ 双端预测 + 结果记录；走中继时后台升级到直连<br/>startPreflight / predict / settle / check -room / upgrader"]:::changed

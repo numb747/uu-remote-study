@@ -1,3 +1,9 @@
+## 2026-11-21 · 给朋友用 · 第 3 步：诊断和反馈（arch-design）
+
+- 34-contacts：`diag`、`collector` 从 planned 转正（锚点 `reasonOf`、`reportSink`）。diag 节点写全了：原因码 + 人话（`@REASON`）、每次连接的过程记录 `trace/`、诊断报告 `p2pcp report`（名字打码）、日志落盘、崩溃现场、结束时 `/H` 上报（没回执进本机队列）；collector 是会合服务器的 `-reports`（回 `/HK`，写 reports.jsonl）+ `report-stats.py`。安卓 App 到 diag 的边加上「上报开关」。
+- 总览：rdv 节点加「收 p2pcp 的诊断上报 /H」。
+- 没画：`lab/netns/p2pcp-test.sh` 新用例 diag（造出各类失败），`p2p-direct report / upload`（31 号图名额已满）。
+
 ## 2026-11-21 · 设计中：P2P 直传给朋友用（arch-design）
 
 - 新设计 `DESIGN.md`（上一份「先体检、再直传」已完成，归档到 `designs/2026-11-21-preflight.md`）。新图 27-flow-pairing（邀请码加好友 → 互换名片 → 配对密钥 → 通讯录 → serve / send -to）和 34-contacts（安卓 App、桌面版本地网页、系统集成、Go 核心的新命令、身份和通讯录文件、发布），新节点都是 `planned`。
