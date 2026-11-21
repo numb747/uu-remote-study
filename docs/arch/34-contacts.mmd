@@ -3,7 +3,7 @@ flowchart LR
   browser["浏览器"]
   subgraph clients["客户端（薄壳，启动 p2pcp、读 -progress 的 @ 行）"]
     android["安卓 App 通讯录模式：好友列表、邀请二维码、粘贴 / 链接加好友、选人发送；前台服务常驻 serve -reg 20s，熄屏要系统放行后台<br/>MainActivity / P2PService"]
-    webui["桌面版 p2pcp app：127.0.0.1 本地网页（HTML 内嵌），通讯录 / 加好友 / 发送 / 记录；同进程跑 serve"]:::planned
+    webui["桌面版 p2pcp app：127.0.0.1 本地网页（HTML 内嵌），通讯录 / 加好友 / 拖文件发送 / 记录 / 诊断；同进程跑 serve，@ 行经 SSE 推给网页；令牌 cookie + Host + Origin 校验，单实例<br/>app.go / app.html"]:::changed
     osint["系统集成 ×3：开机自启（启动文件夹 / LaunchAgent / systemd）、右键发送（发送到 / Dolphin）、通知"]:::planned
   end
   subgraph core["lab/p2pcp（Go，四个平台共用）"]
@@ -45,6 +45,7 @@ flowchart LR
 %% @src serve lab/p2pcp/pair.go func serve(o opts)
 %% @src pair lab/p2pcp/contacts.go func pairSecret(
 %% @src rdv lab/punch/main.go func runServer
+%% @src webui lab/p2pcp/app.go func cmdApp(
 %% @src diag lab/p2pcp/reason.go func reasonOf(
 %% @src collector lab/punch/main.go func reportSink(
 %% @link pair 27-flow-pairing.mmd

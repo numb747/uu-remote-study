@@ -1,3 +1,7 @@
+## 2026-11-21 · 给朋友用 · 第 4 步（进行中）：桌面版 p2pcp app（arch-design）
+
+- 34-contacts：`webui` 从 planned 转正（锚点 `cmdApp`）：本地网页（app.html 内嵌）、同进程跑 serve、@ 行经 SSE 推给网页、令牌 cookie + Host + Origin 校验、单实例。`osint` 仍是 planned（Linux 的 systemd 单元和启动器写进了 install.sh，但还没在用户电脑上切换；Windows / macOS 在第 5、6 步）。
+
 ## 2026-11-21 · 给朋友用 · 第 3 步：诊断和反馈（arch-design）
 
 - 34-contacts：`diag`、`collector` 从 planned 转正（锚点 `reasonOf`、`reportSink`）。diag 节点写全了：原因码 + 人话（`@REASON`）、每次连接的过程记录 `trace/`、诊断报告 `p2pcp report`（名字打码）、日志落盘、崩溃现场、结束时 `/H` 上报（没回执进本机队列）；collector 是会合服务器的 `-reports`（回 `/HK`，写 reports.jsonl）+ `report-stats.py`。安卓 App 到 diag 的边加上「上报开关」。

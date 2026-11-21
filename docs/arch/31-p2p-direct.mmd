@@ -12,7 +12,7 @@ flowchart LR
   nat_pc["路由器 NAT<br/>电脑侧"]
   subgraph pc["电脑"]
     pc_entry["发送入口：启动器 / Dolphin 右键，好友不止一个时弹框选；邀请 / 加好友<br/>p2p-direct send / invite / join"]:::changed
-    pc_svc["常驻接收所有好友：systemd 用户服务<br/>p2p-direct serve"]:::changed
+    pc_svc["常驻接收所有好友 + 本机网页界面：systemd 用户服务<br/>p2p-direct app -no-browser"]:::changed
     pc_core["p2pcp 核心（Go）<br/>~/.local/bin/p2pcp，-bind auto 每轮取物理网卡 IP"]
     pc_dl["~/Downloads/P2P直传/好友名"]
     notify["桌面通知<br/>notify-send"]
@@ -42,7 +42,7 @@ flowchart LR
 %% @src app_core apps/android/src/dev/uulab/p2p/P2PService.java public class P2PService extends Service
 %% @src rdv lab/punch/main.go func runServer
 %% @src pc_entry apps/pc/p2p-direct send)
-%% @src pc_svc apps/pc/install.sh ExecStart=%h/.local/bin/p2p-direct serve
+%% @src pc_svc apps/pc/install.sh ExecStart=%h/.local/bin/p2p-direct app -no-browser
 %% @src pc_core apps/pc/install.sh -o ~/.local/bin/p2pcp ./p2pcp
 %% @link app_core 24-flow-p2pcp.mmd
 %% @link pc_core 24-flow-p2pcp.mmd
