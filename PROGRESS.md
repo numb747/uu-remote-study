@@ -126,7 +126,7 @@
 - **设计和进度都在 [docs/arch/DESIGN.md](docs/arch/DESIGN.md)**（21 条决策、7 步实现顺序），图 27-flow-pairing / 34-contacts。用户定：安卓 / Windows / macOS / Linux，不做 iPhone。新会话从「实现顺序」第一个没勾的（第 3 步桌面版本地网页 `p2pcp app`）接着做，第 3 步附了实施提示，已定的事不再讨论。
 - 已完成：p2pcp 通讯录模式（`id / invite / join / contacts / send -to / serve`，设备密钥 X25519，好友之间的房间由 ECDH 派生、按方向分收件房间）；安卓 App 和电脑端 `p2p-direct` 都换成通讯录模式，旧的 `room` 退役。**我的电脑（cachyos-x8664）和手机（V2238A）已经重新配对**，两个方向、熄屏接收都实测过。
 - 手机上为了熄屏接收，已在系统设置里给 P2P 直传打开「允许后台高耗电」，并用 adb 把它加进了 deviceidle 白名单（vivo 熄屏会冻结 App，见 DESIGN 决策 19）。
-- 提交都在本地 `main`，**这次会话后半段的提交还没推送**（推送到 5365f83 为止）。
+- 提交已全部推送（到 6b9c1a9）。
 - 干活的小坑：手机有锁屏密码，装 App、看 App 界面要先让用户解锁；`/tmp/pairsmoke/tap.sh <文字>` 用 uiautomator 按文字点按钮；App 的配置在私有目录，adb 读不到，App 侧的问题只能看界面日志或改代码多打日志。
 
 ### 0.6 换到有 IPv6 的新电脑后，第一步
