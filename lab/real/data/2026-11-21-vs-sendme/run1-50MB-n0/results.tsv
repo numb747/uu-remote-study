@@ -1,0 +1,16 @@
+p2pcp	ph2pc	1	14262	ok
+sendme	ph2pc	1	14218	ok
+p2pcp	pc2ph	1	4060	ok
+sendme	pc2ph	1	6199	ok
+p2pcp	ph2pc	2	12266	ok
+sendme	ph2pc	2	13868	ok
+p2pcp	pc2ph	2	5231	ok
+sendme	pc2ph	2	9760	ok
+p2pcp	ph2pc	3	14586	ok
+sendme	ph2pc	3	15058	ok
+p2pcp	pc2ph	3	4045	ok
+sendme	pc2ph	3	7361	ok
+p2pcp-1c-bbr	pc2ph	1	4441	ok
+p2pcp-1c-bbr	pc2ph	2	33047	ok
+p2pcp-1c-cubic	pc2ph	1	5587	ok
+p2pcp-1c-cubic	pc2ph	2	5390	ok

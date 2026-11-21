@@ -99,6 +99,13 @@
 - 实测：netns 实验室 `lab/netns/p2pcp-test.sh` 全过（port/port 13 项、sym/sym 5 项）；真实网络上手机连切三次数据、换了三次公网 IP，隧道 TCP 会话不断；中继 84ms 连上、15 秒后自己迁到直连。
 - **协议和 v1 不兼容，两端都要升级**：电脑端已装（`apps/pc/install.sh`），手机 App 已装（电脑 → 手机已验证），monkey 上的 expose 待换新版。
 
+### 0.5.10 p2pcp 与 sendme（iroh）对比实测（2026-11-21）
+- 起因：打算把 p2pcp 做成「先体检、再直传」的自用工具（自己和熟人用），先摸清同类的 sendme / iroh 做到了什么程度。详见 [docs/13](docs/13-p2pcp与sendme对比实测.md)，原始数据 `lab/real/data/2026-11-21-vs-sendme/`。
+- PC ↔ 手机 5G 两个方向，全部打洞直连成功，sha256 全对。sendme 走 n0 公共中继时（美、欧，国内没有），1~1.6s 才能传、约 2~3s 切到直连；在 99-server 上自建 iroh-relay 后，降到 200~250ms 能传、约 0.5s 切到直连，和 p2pcp（约 220ms，一开始就是直连）基本持平。吞吐：手机→PC 都卡在 5G 上行，PC→手机 p2pcp 默认的 2 条连接更快。
+- 更正：p2pcp 日志里的「连上…用时」只算会合 + 打洞，不含之后的 QUIC 握手和认证；改成从进程启动算到「连上」，实际是 170~280ms。抓到 1 轮打洞 118ms、QUIC 握手却花了约 4.4s（疑似握手包被还在打洞的对方扔掉，待查）。
+- **决定：继续研究 p2pcp**（每一层都自己懂）。待办放在前面：借鉴 sendme 的「先走中继、再升级直连」，以及中继走 TCP 443。
+- 99-server 上留下的东西：iroh-relay 1.5.0 在 `/opt/iroh-relay/`（配置和 token 只有 root 能读），用 `systemd-run` 临时单元 `iroh-relay-test` 跑（`RuntimeMaxSec=1d`，重启服务器后不会再起来）；snap 版 certbot 5.10 和 Let's Encrypt IP 证书 `/etc/letsencrypt/live/8.140.18.211/`（6 天，自动续期，续期时临时占用 TCP 80）；安全组新开了 UDP 7842（iroh 的 QAD 用）。
+
 ### 0.6 换到有 IPv6 的新电脑后，第一步
 ```bash
 ip -6 addr show scope global          # 有 2xxx: 开头的地址 = 有全球单播 IPv6

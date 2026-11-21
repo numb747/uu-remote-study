@@ -1,0 +1,27 @@
+2026-11-21T00:11:01.718097Z DEBUG iroh::_events::direct_addrs: addrs={DirectAddr { addr: 100.69.5.85:58639, typ: Local }, DirectAddr { addr: [240e:440:40e:ee65:18e9:e0f5:e0d7:c916]:52828, typ: Local }, DirectAddr { addr: [240e:541:418:233:18e9:e095:f40b:4952]:52828, typ: Local }}
+2026-11-21T00:11:01.723133Z DEBUG iroh::net_report: net_report starting do_full=true
+2026-11-21T00:11:01.723790Z  WARN n0_dns_resolver::system_config: failed to read system DNS configuration, using fallback err=No such file or directory (os error 2)
+2026-11-21T00:11:02.285774Z DEBUG QADv4: iroh::net_report: probe report r=QadProbeReport { relay: RelayUrl("https://usw1-1.relay.n0.iroh.link./"), latency: 206.601769ms, addr: 36.98.133.6:21199 }
+2026-11-21T00:11:02.288553Z DEBUG QADv6: iroh::net_report: probe report r=QadProbeReport { relay: RelayUrl("https://usw1-1.relay.n0.iroh.link./"), latency: 226.135385ms, addr: [240e:440:40e:ee65:18e9:e0f5:e0d7:c916]:52828 }
+2026-11-21T00:11:02.289407Z DEBUG QADv6: iroh::net_report: probe report r=QadProbeReport { relay: RelayUrl("https://euc1-1.relay.n0.iroh.link./"), latency: 209.617616ms, addr: [240e:440:40e:ee65:18e9:e0f5:e0d7:c916]:52828 }
+2026-11-21T00:11:02.289534Z DEBUG iroh::net_report: enough probes: 3
+2026-11-21T00:11:02.289615Z DEBUG iroh::net_report: net_report generated report=Report { udp_v4: true, udp_v6: true, mapping_varies_by_dest_ipv4: None, mapping_varies_by_dest_ipv6: Some(false), preferred_relay: Some(RelayUrl("https://usw1-1.relay.n0.iroh.link./")), relay_latency: RelayLatencies { ipv4: {RelayUrl("https://usw1-1.relay.n0.iroh.link./"): 206.601769ms}, ipv6: {RelayUrl("https://euc1-1.relay.n0.iroh.link./"): 209.617616ms, RelayUrl("https://usw1-1.relay.n0.iroh.link./"): 226.135385ms}, https: {} }, global_v4: Some(36.98.133.6:21199), global_v6: Some([240e:440:40e:ee65:18e9:e0f5:e0d7:c916]:52828), captive_portal: None } duration=567.892615ms
+2026-11-21T00:11:02.290354Z DEBUG iroh::_events::direct_addrs: addrs={DirectAddr { addr: 36.98.133.6:21199, typ: Qad }, DirectAddr { addr: 100.69.5.85:58639, typ: Local }, DirectAddr { addr: [240e:440:40e:ee65:18e9:e0f5:e0d7:c916]:52828, typ: Qad }, DirectAddr { addr: [240e:541:418:233:18e9:e095:f40b:4952]:52828, typ: Local }}
+2026-11-21T00:11:02.291070Z DEBUG iroh::_events::relay::home_changed: url=https://usw1-1.relay.n0.iroh.link./ home_relay=true
+2026-11-21T00:11:02.940185Z DEBUG iroh::_events::relay::connected: url=https://usw1-1.relay.n0.iroh.link./ home_relay=true
+imported file vs.bin, 50.00 MiB, hash 707712da0e4ac92e25082be7d31d29c6a287078aac6e35f5e19025ca681c9856
+to get this data, use
+sendme receive blobadbi4dav6syfmvc2kc5sfsspieobambxh2xlph2go7i6h7sbyccf4ajdnb2hi4dthixs65lto4ys2mjoojswyylzfzxdaltjojxwqltmnfxgwlrpaqaciyufa3h2kaiamrcqkvmpzibqcjaoaraaidxomumotyhv4dl4sfw4tqbqcjaoavaqigacgmmotyev6qfusuw4tqbqc4dxclna4swjfysqqk7h2mostrvcq4dyvldogx26debfzjubzgcw
+2026-11-21T00:11:03.763136Z DEBUG iroh::_events::conn::incoming: remote_addr=Relay { url: RelayUrl("https://usw1-1.relay.n0.iroh.link./"), endpoint_id: PublicKey(0a2eca6b5ec0236f472cff9b3af53a737f45702e035c1a96ee27a699b5bcffc5) }
+2026-11-21T00:11:04.178931Z DEBUG iroh::_events::conn::connected: conn_id=542676430080 side=Server remote_id=0a2eca6b5e alpn=/iroh-bytes/4
+2026-11-21T00:11:04.180667Z DEBUG iroh::_events::path::open: remote=0a2eca6b5e conn_id=542676430080 path_id=0 network_path=Relay(https://usw1-1.relay.n0.iroh.link./, 0a2eca6b5e)
+2026-11-21T00:11:04.181012Z DEBUG iroh::_events::path::set_status: remote=0a2eca6b5e conn_id=542676430080 path_id=0 network_path=Relay(https://usw1-1.relay.n0.iroh.link./, 0a2eca6b5e) status=Backup prev_status=Available
+2026-11-21T00:11:04.181176Z DEBUG iroh::_events::path::selected: remote=0a2eca6b5e network_path=Relay(https://usw1-1.relay.n0.iroh.link./, 0a2eca6b5e) prev_network_path=None
+2026-11-21T00:11:04.181266Z DEBUG iroh::_events::path::set_status: remote=0a2eca6b5e conn_id=542676430080 path_id=0 network_path=Relay(https://usw1-1.relay.n0.iroh.link./, 0a2eca6b5e) status=Available prev_status=Backup
+2026-11-21T00:11:04.592515Z DEBUG iroh::_events::path::open: remote=0a2eca6b5e conn_id=542676430080 path_id=1 network_path=Ip(100.69.5.85->120.1.4.60:41884)
+2026-11-21T00:11:04.592750Z DEBUG iroh::_events::path::set_status: remote=0a2eca6b5e conn_id=542676430080 path_id=1 network_path=Ip(100.69.5.85->120.1.4.60:41884) status=Backup prev_status=Available
+2026-11-21T00:11:04.592874Z DEBUG iroh::_events::path::selected: remote=0a2eca6b5e network_path=Ip(100.69.5.85->120.1.4.60:41884) prev_network_path=Relay(https://usw1-1.relay.n0.iroh.link./, 0a2eca6b5e)
+2026-11-21T00:11:04.592950Z DEBUG iroh::_events::path::set_status: remote=0a2eca6b5e conn_id=542676430080 path_id=0 network_path=Relay(https://usw1-1.relay.n0.iroh.link./, 0a2eca6b5e) status=Backup prev_status=Available
+2026-11-21T00:11:04.593026Z DEBUG iroh::_events::path::set_status: remote=0a2eca6b5e conn_id=542676430080 path_id=1 network_path=Ip(100.69.5.85->120.1.4.60:41884) status=Available prev_status=Backup
+2026-11-21T00:11:16.756929Z DEBUG iroh::_events::conn::closed: conn_id=542676430080 remote_id=0a2eca6b5e reason=ApplicationClosed(ApplicationClose { error_code: 0, reason: b"" })
+Terminated 

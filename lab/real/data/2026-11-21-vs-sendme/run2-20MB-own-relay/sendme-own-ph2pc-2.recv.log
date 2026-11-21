@@ -1,0 +1,25 @@
+2026-11-21T00:36:07.529383Z DEBUG iroh::_events::direct_addrs: addrs={DirectAddr { addr: 192.168.1.95:37145, typ: Local }}
+2026-11-21T00:36:07.530280Z DEBUG iroh::_events::conn::connecting: remote_id=e3cb03124a alpn=/iroh-bytes/4
+2026-11-21T00:36:07.530335Z DEBUG iroh::net_report: net_report starting do_full=true
+2026-11-21T00:36:07.553476Z DEBUG QADv4: iroh::net_report: probe report r=QadProbeReport { relay: RelayUrl("https://8.140.18.211/?token=<TOKEN>"), latency: 11.625112ms, addr: 120.1.4.60:37145 }
+2026-11-21T00:36:07.596663Z DEBUG iroh::_events::relay::connected: url=https://8.140.18.211/?token=<TOKEN> home_relay=false
+2026-11-21T00:36:07.667667Z DEBUG iroh::_events::conn::connected: conn_id=94247359749696 side=Client remote_id=e3cb03124a alpn=/iroh-bytes/4
+2026-11-21T00:36:07.667722Z DEBUG iroh::_events::path::open: remote=e3cb03124a conn_id=94247359749696 path_id=0 network_path=Relay(https://8.140.18.211/?token=<TOKEN>, e3cb03124a)
+2026-11-21T00:36:07.667737Z DEBUG iroh::_events::path::set_status: remote=e3cb03124a conn_id=94247359749696 path_id=0 network_path=Relay(https://8.140.18.211/?token=<TOKEN>, e3cb03124a) status=Backup prev_status=Available
+2026-11-21T00:36:07.667747Z DEBUG iroh::_events::qnt::init: remote=e3cb03124a local_candidates={192.168.1.95:37145} remote_candidates={}
+2026-11-21T00:36:07.667754Z DEBUG iroh::_events::path::selected: remote=e3cb03124a network_path=Relay(https://8.140.18.211/?token=<TOKEN>, e3cb03124a) prev_network_path=None
+2026-11-21T00:36:07.667758Z DEBUG iroh::_events::path::set_status: remote=e3cb03124a conn_id=94247359749696 path_id=0 network_path=Relay(https://8.140.18.211/?token=<TOKEN>, e3cb03124a) status=Available prev_status=Backup
+2026-11-21T00:36:07.745785Z DEBUG iroh::_events::qnt::init: remote=e3cb03124a local_candidates={192.168.1.95:37145} remote_candidates={36.98.133.6:21401, 100.69.5.85:35458, [240e:440:40e:ee65:18e9:e0f5:e0d7:c916]:36701, [240e:541:418:233:18e9:e095:f40b:4952]:36701}
+getting collection 11403f80fd056dde4dec827a97892aef7a0662ec4701adaf065ecac0d40d6b50 1 files, 0 B
+2026-11-21T00:36:07.765537Z DEBUG reportgen-actor:captive-portal: iroh::net_report::reportgen: check_captive_portal error: HTTP request failed: error sending request for url (http://8.140.18.211/generate_204): client error (SendRequest): connection closed before message completed
+2026-11-21T00:36:07.825196Z DEBUG reportgen-actor:run-probe{proto=Https delay=200ms relay=https://8.140.18.211/?token=<TOKEN>}: iroh::net_report::reportgen: probe finished report=Ok(Https(HttpsProbeReport { relay: RelayUrl("https://8.140.18.211/?token=<TOKEN>"), latency: 94.107672ms }))
+2026-11-21T00:36:07.825221Z DEBUG iroh::net_report: net_report generated report=Report { udp_v4: true, udp_v6: false, mapping_varies_by_dest_ipv4: None, mapping_varies_by_dest_ipv6: None, preferred_relay: Some(RelayUrl("https://8.140.18.211/?token=<TOKEN>")), relay_latency: RelayLatencies { ipv4: {RelayUrl("https://8.140.18.211/?token=<TOKEN>"): 11.625112ms}, ipv6: {}, https: {RelayUrl("https://8.140.18.211/?token=<TOKEN>"): 94.107672ms} }, global_v4: Some(120.1.4.60:37145), global_v6: None, captive_portal: None } duration=294.888589ms
+2026-11-21T00:36:07.825256Z DEBUG iroh::_events::direct_addrs: addrs={DirectAddr { addr: 120.1.4.60:37145, typ: Qad }, DirectAddr { addr: 192.168.1.95:37145, typ: Local }}
+2026-11-21T00:36:07.825276Z DEBUG iroh::_events::qnt::init: remote=e3cb03124a local_candidates={120.1.4.60:37145, 192.168.1.95:37145} remote_candidates={36.98.133.6:21401, 100.69.5.85:35458, [240e:440:40e:ee65:18e9:e0f5:e0d7:c916]:36701, [240e:541:418:233:18e9:e095:f40b:4952]:36701}
+2026-11-21T00:36:07.825287Z DEBUG iroh::_events::relay::home_changed: url=https://8.140.18.211/?token=<TOKEN> home_relay=true
+2026-11-21T00:36:07.981151Z DEBUG iroh::_events::path::open: remote=e3cb03124a conn_id=94247359749696 path_id=1 network_path=Ip(192.168.1.95->36.98.133.6:21401)
+2026-11-21T00:36:07.981168Z DEBUG iroh::_events::path::selected: remote=e3cb03124a network_path=Ip(192.168.1.95->36.98.133.6:21401) prev_network_path=Relay(https://8.140.18.211/?token=<TOKEN>, e3cb03124a)
+2026-11-21T00:36:07.981173Z DEBUG iroh::_events::path::set_status: remote=e3cb03124a conn_id=94247359749696 path_id=0 network_path=Relay(https://8.140.18.211/?token=<TOKEN>, e3cb03124a) status=Backup prev_status=Available
+2026-11-21T00:36:07.981177Z DEBUG iroh::_events::path::set_status: remote=e3cb03124a conn_id=94247359749696 path_id=1 network_path=Ip(192.168.1.95->36.98.133.6:21401) status=Available prev_status=Backup
+2026-11-21T00:36:12.254086Z DEBUG iroh::_events::conn::closed: conn_id=94247359749696 remote_id=e3cb03124a reason=LocallyClosed
+exporting to vs.bin
