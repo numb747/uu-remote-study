@@ -11,7 +11,7 @@ flowchart LR
   srv_ft["会合服务器 /FT 应答：收包端口回 /F1，另一个监听端口回 /F2<br/>runServer"]
   classify["分类：open / cone / port / sym；过滤没测出来时 EIM 记 eim，少于两台 STUN 回就是未知<br/>classify + refine"]
   out_flag["编码成标志 nat=类别.v6，对方用 parseNat 解<br/>profile.flag"]
-  out_report["写进体检报告<br/>人读的一行一项"]:::planned
+  out_report["体检行：类别、各台 STUN 看到的映射、端口保持、过滤、缓存与否<br/>profile.String"]
 
   start -->|"先查"| cache
   start -->|"没命中"| p_stun
@@ -34,6 +34,7 @@ flowchart LR
 %% @src classify lab/p2pcp/natprofile.go func classify(
 %% @src out_flag lab/p2pcp/natprofile.go func (p profile) flag()
 %% @src p_ft lab/p2pcp/natprofile.go func probeFilter(
+%% @src out_report lab/p2pcp/natprofile.go func (p profile) String()
 %% @src srv_ft lab/punch/main.go case len(f) == 2 && f[0] == "/FT"
 %% @src p_srv lab/p2pcp/check.go func probeServer(
 %% @src p_v6 lab/p2pcp/rdv.go func global6(

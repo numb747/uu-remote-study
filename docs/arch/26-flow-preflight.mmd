@@ -12,8 +12,8 @@ flowchart TD
   xfer["传输：QUIC 接管 + 通道绑定认证 + 4MB 分块续传<br/>dialPeer / sendSession"]
   upgrade["后台升级：走中继时隔一段再打洞，升级房间由 EKM 派生<br/>打通就在直连上重开会话，have 只报缺的块"]:::planned
   pairtest["实测：打通后测 RTT / 丢包，再测中继<br/>checkPair"]:::planned
-  report["报告：两端画像、预测、实际结果、不通的原因<br/>-progress 输出 @CHECK 行"]:::planned
-  history["预测记录<br/>~/.cache/p2pcp/history.jsonl"]:::planned
+  report["结果行：实际路径、打洞 / 握手分开计时、预测对没对上；-progress 输出 @CHECK<br/>preflight.settle / resultLine"]
+  history["预测记录，打洞失败也记<br/>~/.cache/p2pcp/history.jsonl"]
 
   entry -->|"后台，不等"| profile
   entry_check -->|"现测"| profile
@@ -40,6 +40,7 @@ flowchart TD
 %% @src reg lab/p2pcp/rdv.go reg := func() []byte {
 %% @src predict lab/p2pcp/predict.go func predict(me, peer profile)
 %% @src policy lab/p2pcp/rdv.go early := punchTOs == 1 && o.pre.predictedNo()
+%% @src report lab/p2pcp/preflight.go func (p *preflight) settle(
 %% @src rdv lab/punch/main.go func runServer
 %% @src punch lab/p2pcp/rdv.go func connectOnce(
 %% @src relay lab/p2pcp/rdv.go func joinRelay(

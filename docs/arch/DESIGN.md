@@ -30,6 +30,8 @@
 19. **顺手修的打洞竞态（第 3 步）**：cone ↔ sym 时，cone 端从入包学到对方的新端口后只补发一次 /PP，对方收到 /PA 就停止收包，这个 /PP 没人应，cone 端永远等不到 /PA（netns full ↔ sym 偶发，对方在旧路上等 15 秒 QUIC）。改成把入包源地址（peer-reflexive）加进打洞目标，每 20ms 都打（24 号图 punch 节点）。
 20. **重试策略（第 4 步）**：预测打不通时，发送端一轮不通就请求中继（原来两轮）；「不确定」照「能通」处理。`-relay off` 时完全不变（netns sym ↔ sym 打满 6 轮报错，不走中继）。预测和实际对不上时打一行「预测错了」（`setActual` / `compare`），第 5 步写进预测记录。
 21. **轮次同步（原待定「轮次错位」，第 4 步）**：双方打洞期间每 500ms 重新注册，服务器每次都把对方的最新注册推过来；listen 收到这个 /P 时，对方带了 `relay` 就中途停止打洞、跟进中继（先让 listen 都退出，免得和 joinRelay 抢包）；对方换了新 socket 就把新地址也加进打洞目标。netns `desync` 用例人为错开轮次（B 晚 1.5 秒拿到 /P，前 4.5 秒 A→B 全丢）：port ↔ port 4.5 秒直连、sym ↔ sym 4.0 秒进中继；去掉这两处同步，同样的用例分别是 14 秒（被迫走中继，就是真实网络那次 15 秒的症状）和 10 秒。
+22. **结果行和预测记录（第 5 步）**：传输会话结束（或打洞彻底失败）时 `settle` 一次：结果行把「打洞（或进中继）」「QUIC 握手 + 认证」「从开始会合共计」分开（先启动的接收端「共计」里大半是等对方）；`history.jsonl` 每次一行（两端画像、预测、实际、是否预测错、各段毫秒、第几轮、对方地址）；`-progress` 时同样内容输出 `@CHECK <json>`。只有拿到过对方地址的失败才记（等不到对方不算一次连接）。
+23. **进中继时继续注册（第 5 步抓到的原有竞态）**：先进新一轮的一方拿到对方上一轮的旧注册就去了中继、并立刻注销；对方新一轮注册时房间里找不到它、看不到 relay 标志，只能等它在中继上 6 秒超时再来一轮（port ↔ sym 偶发 10~14 秒）。改成凑齐之前继续每 500ms 注册、凑齐后再注销：netns port ↔ sym、sym ↔ sym 各 3 次，发送端都是 4.0 秒、接收端「先等的时间 + 4 秒」。
 
 ## 待定
 
@@ -60,7 +62,7 @@
   - 节点：26 的 `policy`。
   - 文件：`rdv.go` 的 `connect`：预测「不通」时第一轮失败就带 `relay` 标志；预测「不通」却打通了，`session` 里记一个 `predictionWrong`。
   - 验证：netns `sym ↔ sym`：走中继的时间从约 8 秒降到约 4 秒；`port ↔ port`、`cone ↔ sym` 仍然直连；`-relay off` 时行为不变。
-- [ ] **5. 完整报告 + 预测记录 + `@CHECK`。** 安卓 App 启动 p2pcp 时加环境变量 `XDG_CACHE_HOME=getCacheDir()`（现在 `new ProcessBuilder(cmd)` 没设，手机上没有缓存，作发送端时对方总拿不到它的画像），重新打包安装。 打洞和 QUIC 握手分开计时（2026-11-21 实测有一轮打洞 118ms、握手 4.4s，docs/13 第 5 节，原来的「用时」看不出来）。
+- [x] **5. 完整报告 + 预测记录 + `@CHECK`。**（2026-11-21：单元测试 wrongPrediction / settle 写记录和 @CHECK、只记一次、失败也记；netns preflight 检查结果行和 4 条记录全对，port↔port 全部回归 25/25，sym↔sym 17/17；真实网络手机 → PC 结果行、@CHECK、记录都对。电脑常驻服务和手机 App 都已更新；电脑 → App 发测试文件，电脑收到 App 报的画像 port + IPv6，预测与实际对上。App 不是 debuggable 构建，读不到它的环境变量和缓存目录，App 侧缓存是否生效没能直接确认） 安卓 App 启动 p2pcp 时加环境变量 `XDG_CACHE_HOME=getCacheDir()`（现在 `new ProcessBuilder(cmd)` 没设，手机上没有缓存，作发送端时对方总拿不到它的画像），重新打包安装。 打洞和 QUIC 握手分开计时（2026-11-21 实测有一轮打洞 118ms、握手 4.4s，docs/13 第 5 节，原来的「用时」看不出来）。
   - 节点：26 的 `report`、`history`；33 的 `out_report`。
   - 文件：新建 `checkreport.go`：启动时一行、结束时一行（实际路径、建连耗时、是否预测错），追加 `~/.cache/p2pcp/history.jsonl`；`-progress` 的 `@CHECK <json>` 加在现有 `report.go` 的 `reporter` 上（和 `@STATE` 等放在一起）。
   - 验证：单元测试 history 行的格式；安卓 `MainActivity` 是 `switch` 分发 `@` 行的，确认没有命中的分支时不会报错，`apps/pc/p2p-direct` 也看一遍；真实网络发一次，history 里多一行。

@@ -13,7 +13,7 @@ flowchart TD
     chosen["发送端：第一个 /PA 定路径<br/>用包的源地址作对端（prflx），关掉另一个 socket"]
     nom["提名：发送端在选中路径上发 3 个 /PN<br/>接收端有两个 socket 时等 /PN 或首个 QUIC Initial"]
     retry["4 秒不通、坏端口或失联 → 换新端口、换下一个会合地址重来<br/>最多 6 轮，失败时分层诊断"]
-    relay["发送端两轮打不通（体检预测打不通时一轮）：/R2 带 relay 标志；对方打洞中途从重推的 /P 看到就跟过去<br/>goRelay / joinRelay：/L 房间号.发送端id d|l → /LK"]:::changed
+    relay["发送端两轮打不通（预测打不通时一轮）：/R2 带 relay 标志，对方中途看到就跟；等凑齐时继续注册<br/>goRelay / joinRelay：/L 房间号.发送端id d|l → /LK"]:::changed
   end
   subgraph data["③ 传输：QUIC 接管同一个 socket"]
     quic["newLink：quic.Transport 接管（quietConn 把发送错误当丢包）<br/>后台 readNonQUIC 回应迟到的 /PP；SIGTERM 时 closeLive"]:::changed
