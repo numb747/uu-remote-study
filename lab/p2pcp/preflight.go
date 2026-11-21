@@ -19,6 +19,8 @@ import (
 )
 
 type preflight struct {
+	role     string    // send / recv
+	rep      *reporter // -progress 时输出 @CHECK
 	mu       sync.Mutex
 	me       *profile // nil = 还在测
 	peer     profile
@@ -28,6 +30,7 @@ type preflight struct {
 	ready    chan struct{} // 本机画像测完时关闭
 	actual   string        // 实际结果：直连 / 中继；空 = 还没连上
 	checked  bool          // 预测和实际已经对过
+	settled  bool          // 结果已经报过、记过
 }
 
 // predictedNo：已经预测出「打不通」（connect 的重试策略用：一轮不通就请求中继）
@@ -69,8 +72,8 @@ func (p *preflight) compare() {
 }
 
 // startPreflight 在后台测本机画像（先查缓存），立刻返回
-func startPreflight(o opts) *preflight {
-	p := &preflight{ready: make(chan struct{})}
+func startPreflight(o opts, role string) *preflight {
+	p := &preflight{role: role, rep: o.rep, ready: make(chan struct{})}
 	go func() { p.setMe(cachedProfile(o)) }() // 别写成 go p.setMe(cachedProfile(o))：参数在当前 goroutine 里求值，就不并行了
 	return p
 }
@@ -138,18 +141,34 @@ func (p *preflight) tryReport() {
 	p.compare()
 }
 
-// settle 在传输会话结束时调用：等本机画像测完（最多 1.5 秒），还没预测过就把缺的那一半说清楚
-func (p *preflight) settle() {
+// settle 在传输会话结束（或打洞彻底失败）时调用：等本机画像测完（最多 1.5 秒），还没预测过就把缺的那一半说清楚，
+// 然后打结果行、写预测记录、输出 @CHECK（checkreport.go）。只做一次
+func (p *preflight) settle(out outcome) {
 	if p == nil {
 		return
 	}
 	p.wait(1500 * time.Millisecond)
 	p.mu.Lock()
 	defer p.mu.Unlock()
-	if p.reported || p.me == nil {
+	if p.settled {
 		return
 	}
-	p.reported = true
-	p.verdict = verdict{predUnknown, "对方的画像没赶上（打洞比体检快，或对方是旧版 p2pcp）"}
-	log.Printf("体检  %s", p.verdict)
+	p.settled = true
+	if !p.reported && p.me != nil {
+		p.reported = true
+		p.verdict = verdict{predUnknown, "对方的画像没赶上（打洞比体检快，或对方是旧版 p2pcp）"}
+		log.Printf("体检  %s", p.verdict)
+	}
+	rec := histRec{
+		At: time.Now(), Role: p.role, Me: histOf(p.me), Predict: p.verdict.Result, Why: p.verdict.Why,
+		Actual: out.actual, Via: out.via, Err: out.err, Rounds: out.rounds,
+		TookMs: out.took.Milliseconds(), PunchMs: out.punch.Milliseconds(), HandshakeMs: out.handshake.Milliseconds(),
+	}
+	if p.havePeer {
+		rec.Peer = histOf(&p.peer)
+	}
+	rec.Wrong = wrongPrediction(rec.Predict, rec.Actual)
+	log.Printf("体检  %s", resultLine(rec))
+	appendHistory(rec)
+	p.rep.check(rec)
 }

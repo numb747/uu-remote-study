@@ -343,7 +343,11 @@ public class MainActivity extends Activity {
         Collections.addAll(cmd, "-server", server, "-progress", "-lan", lanIPs());
         for (int i = 1; i < args.length; i++) cmd.add(args[i]);
         try {
-            Process p = new ProcessBuilder(cmd).start();
+            ProcessBuilder pb = new ProcessBuilder(cmd);
+            // 体检的画像缓存和预测记录放 App 的缓存目录：App 进程没有可用的 HOME，不给就每次现测画像，
+            // 当发送端时对方总拿不到它的画像（打洞比现测画像快，lab/p2pcp/preflight.go）
+            pb.environment().put("XDG_CACHE_HOME", getCacheDir().getPath());
+            Process p = pb.start();
             if (args[0].equals("daemon")) daemon = p;
             new Thread(() -> pump(p.getErrorStream(), null)).start();
             pump(p.getInputStream(), panel);

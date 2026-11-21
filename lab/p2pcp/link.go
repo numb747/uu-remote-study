@@ -58,14 +58,15 @@ func quicConf(alpn string) *quic.Config {
 
 type link struct {
 	*session
-	secret   []byte
-	alpn     string
-	tr       *quic.Transport
-	ln       *quic.Listener // 接收端才有
-	conn     *quic.Conn     // 第一条连接
-	sig      chan []string  // 经这个 socket 收到的会合报文（/Y、/P），连接迁移用
-	socks    []*quietConn   // 这条连接用过的所有 socket（第一个是打洞的那个，之后每迁移一次多一个），最后一个是当前的
-	stranded int            // 迁移失败、又要等连接结束才能回收的 socket 数（tunnel.go migrate）
+	secret    []byte
+	alpn      string
+	tr        *quic.Transport
+	ln        *quic.Listener // 接收端才有
+	conn      *quic.Conn     // 第一条连接
+	sig       chan []string  // 经这个 socket 收到的会合报文（/Y、/P），连接迁移用
+	socks     []*quietConn   // 这条连接用过的所有 socket（第一个是打洞的那个，之后每迁移一次多一个），最后一个是当前的
+	stranded  int            // 迁移失败、又要等连接结束才能回收的 socket 数（tunnel.go migrate）
+	handshake time.Duration  // 第一条连接的 QUIC 握手 + 认证（接收端含等对方 Dial 过来）
 
 	mu      sync.Mutex
 	conns   []*quic.Conn
@@ -287,10 +288,12 @@ func dialPeer(o opts, alpn string) (*link, error) {
 		return nil, err
 	}
 	l := newLink(s, secret, alpn)
+	t0 := time.Now()
 	if l.conn, err = l.dial(); err != nil {
 		l.close()
 		return nil, err
 	}
+	l.handshake = time.Since(t0)
 	return l, nil
 }
 
@@ -311,10 +314,12 @@ func acceptPeer(o opts, alpn string) (*link, error) {
 		return nil, err
 	}
 	l.onClose(func() { l.ln.Close() })
+	t0 := time.Now()
 	if l.conn, err = l.accept(15 * time.Second); err != nil {
 		l.close()
 		return nil, err
 	}
+	l.handshake = time.Since(t0)
 	return l, nil
 }
 
@@ -329,7 +334,8 @@ func statsLine(c *quic.Conn) string {
 }
 
 func logLinked(l *link) {
-	log.Printf("连上 %s，用时 %v", l.via(), l.took.Round(time.Millisecond))
+	log.Printf("连上 %s，用时 %v（会合 + 打洞 %v，QUIC 握手 + 认证 %v）", l.via(), (l.took + l.handshake).Round(time.Millisecond),
+		l.took.Round(time.Millisecond), l.handshake.Round(time.Millisecond))
 }
 
 // selfSigned：证书只是 TLS 1.3 的形式要求，不校验，身份靠 auth.go 的通道绑定

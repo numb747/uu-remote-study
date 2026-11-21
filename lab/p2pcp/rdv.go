@@ -35,6 +35,8 @@ type session struct {
 	server  *net.UDPAddr // 这次用的会合服务器（连接迁移时继续用它）
 	relayed bool
 	took    time.Duration // 从开始注册到打通（含重试）
+	punch   time.Duration // 成功那一轮的打洞（或进中继）用时
+	rounds  int           // 第几轮连上的
 	pre     *preflight    // 这次的体检（-stun off 时为 nil）
 }
 
@@ -62,7 +64,7 @@ func randHex(n int) string {
 func connect(o opts, rid, role string) (*session, error) {
 	const attempts = 6
 	if o.stun != "off" && o.stun != "" {
-		o.pre = startPreflight(o) // 后台测，不等；传输会话结束时 settle（preflight.go）
+		o.pre = startPreflight(o, role) // 后台测，不等；传输会话结束时 settle（preflight.go）
 	}
 	servers := strings.Split(o.server, ",")
 	first := int(goodServer.Load())
@@ -83,6 +85,7 @@ func connect(o opts, rid, role string) (*session, error) {
 		}
 		var s *session
 		if s, err = connectOnce(o, servers[k], rid, id, relay); err == nil {
+			s.punch, s.rounds = s.took, i+1 // connectOnce 填的是这一轮的打洞用时
 			s.took = time.Since(start)
 			s.pre = o.pre
 			o.pre.setActual(s.relayed)
@@ -98,6 +101,9 @@ func connect(o opts, rid, role string) (*session, error) {
 			return nil, err // 等不到对方之类的错误，重来也没用
 		}
 		log.Printf("第 %d 轮失败（会合 %s：%v），换端口重来", i+1, servers[k], err)
+	}
+	if punchTOs > 0 || errors.Is(err, errRelay) {
+		o.pre.settle(outcome{actual: "失败", err: err.Error(), took: time.Since(start), rounds: attempts})
 	}
 	// 按层说清楚坏在哪：昨天能用今天不能用，多半是网络环境变了，先知道是哪一层
 	switch {
@@ -288,8 +294,11 @@ func connectOnce(o opts, server, rid, id string, wantRelay bool) (*session, erro
 	// 注销还是要的：否则服务器在 30 秒内还会把这次的旧地址推给下一次注册的人
 	controlling := strings.HasPrefix(id, "send.")
 
+	// goRelay 去中继报到。凑齐之前不注销、继续注册：先进新一轮的一方拿到的可能是对方上一轮的旧注册，
+	// 它一注销，对方新一轮注册时房间里就找不到它、看不到 relay 标志，只能干等它在中继上 6 秒超时再来一轮
+	// （netns port ↔ sym 偶发 10~14 秒，2026-11-21 第 5 步抓到）
 	goRelay := func(why string) (*session, error) {
-		unreg()
+		defer unreg()
 		if c6 != nil {
 			c6.Close()
 		}
@@ -300,12 +309,13 @@ func connectOnce(o opts, server, rid, id string, wantRelay bool) (*session, erro
 		}
 		relay := &net.UDPAddr{IP: srv.IP, Port: relayPort}
 		t0 := time.Now()
-		if err := joinRelay(c, relay, rid+"."+dialer, map[bool]string{true: "d", false: "l"}[controlling]); err != nil {
+		keep := func() { c.WriteToUDP(reg(), srv) }
+		if err := joinRelay(c, relay, rid+"."+dialer, map[bool]string{true: "d", false: "l"}[controlling], keep); err != nil {
 			c.Close()
 			return nil, err
 		}
 		log.Printf("%s，改走中继 %s（%v）", why, relay, time.Since(t0).Round(time.Millisecond))
-		return &session{conn: c, peer: relay, server: srv, relayed: true}, nil
+		return &session{conn: c, peer: relay, server: srv, relayed: true, took: time.Since(t0)}, nil
 	}
 	if useRelay {
 		return goRelay("打洞不通")
@@ -486,12 +496,18 @@ func connectOnce(o opts, server, rid, id string, wantRelay bool) (*session, erro
 	}
 }
 
-// joinRelay 向中继报到，等两端凑齐（/LK）。对方可能晚到几百毫秒，最多等 6 秒
-func joinRelay(c *net.UDPConn, relay *net.UDPAddr, key, end string) error {
+// joinRelay 向中继报到，等两端凑齐（/LK）。对方可能晚到几百毫秒，最多等 6 秒。
+// keep 非空时每 500ms 调一次（connectOnce 用它继续在会合服务器上注册，见 goRelay）
+func joinRelay(c *net.UDPConn, relay *net.UDPAddr, key, end string, keep func()) error {
 	msg := []byte("/L " + key + " " + end)
 	buf := make([]byte, 1500)
 	deadline := time.Now().Add(6 * time.Second)
+	var lastKeep time.Time
 	for time.Now().Before(deadline) {
+		if keep != nil && time.Since(lastKeep) >= 500*time.Millisecond {
+			keep()
+			lastKeep = time.Now()
+		}
 		c.WriteToUDP(msg, relay)
 		c.SetReadDeadline(time.Now().Add(200 * time.Millisecond))
 		for {

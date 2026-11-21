@@ -5,6 +5,7 @@ import (
 	"crypto/tls"
 	"encoding/json"
 	"errors"
+	"io"
 	"net"
 	"os"
 	"reflect"
@@ -382,7 +383,7 @@ func TestPreflightOrder(t *testing.T) {
 	q := &preflight{ready: make(chan struct{})}
 	q.setMe(profile{Class: natCone})
 	q.sawPeer("-")
-	q.settle()
+	q.settle(outcome{actual: "直连"})
 	if !q.reported || q.verdict.Result != predUnknown {
 		t.Fatalf("对方画像没到：%+v", q.verdict)
 	}
@@ -391,14 +392,14 @@ func TestPreflightOrder(t *testing.T) {
 	go func() { time.Sleep(200 * time.Millisecond); r.setMe(profile{Class: natPort}) }()
 	r.sawPeer("nat=cone")
 	t0 := time.Now()
-	r.settle()
+	r.settle(outcome{actual: "直连"})
 	if el := time.Since(t0); !r.reported || r.verdict.Result != predYes || el < 150*time.Millisecond || el > time.Second {
 		t.Fatalf("settle 应等到本机画像（%v）：%+v", el, r.verdict)
 	}
 	var nilp *preflight // -stun off 时 o.pre 是 nil，各方法都要能调
 	nilp.sawPeer("nat=sym")
 	nilp.wait(time.Second)
-	nilp.settle()
+	nilp.settle(outcome{})
 	if nilp.flag() != "" {
 		t.Fatal("nil preflight 的 flag 应为空")
 	}
@@ -434,5 +435,72 @@ func TestPreflightActual(t *testing.T) {
 	nilp.setActual(true)
 	if nilp.predictedNo() {
 		t.Fatal("nil preflight 不该预测打不通")
+	}
+}
+
+func TestWrongPrediction(t *testing.T) {
+	cases := []struct {
+		pred, actual string
+		wrong        bool
+	}{
+		{predYes, "直连", false}, {predYes, "中继", true}, {predYes, "失败", true},
+		{predNo, "中继", false}, {predNo, "失败", false}, {predNo, "直连", true},
+		{predMaybe, "中继", false}, {predUnknown, "直连", false}, {"", "直连", false},
+	}
+	for _, c := range cases {
+		if got := wrongPrediction(c.pred, c.actual); got != c.wrong {
+			t.Errorf("预测%q 实际%q：得到 %v", c.pred, c.actual, got)
+		}
+	}
+}
+
+// TestSettleHistory：settle 写一行 history.jsonl，-progress 时 stdout 输出同样内容的 @CHECK；只记一次
+func TestSettleHistory(t *testing.T) {
+	t.Setenv("XDG_CACHE_HOME", t.TempDir())
+	r, w, _ := os.Pipe()
+	stdout := os.Stdout
+	os.Stdout = w
+	p := &preflight{role: "send", rep: &reporter{machine: true}, ready: make(chan struct{})}
+	p.setMe(profile{Class: natSym, Mapped: []*net.UDPAddr{nil, udpAddr("1.2.3.4:5")}})
+	p.sawPeer("nat=port.v6")
+	out := outcome{actual: "直连", via: "5.6.7.8:9", took: 120 * time.Millisecond, punch: 80 * time.Millisecond, handshake: 4400 * time.Millisecond, rounds: 1}
+	p.settle(out)
+	p.settle(out) // 第二次不该再记
+	w.Close()
+	os.Stdout = stdout
+	printed, _ := io.ReadAll(r)
+
+	b, err := os.ReadFile(historyPath())
+	if err != nil {
+		t.Fatal(err)
+	}
+	lines := strings.Split(strings.TrimSpace(string(b)), "\n")
+	if len(lines) != 1 {
+		t.Fatalf("应只有一行记录，得到 %d 行", len(lines))
+	}
+	var rec histRec
+	if err := json.Unmarshal([]byte(lines[0]), &rec); err != nil {
+		t.Fatal(err)
+	}
+	want := histRec{Role: "send", Me: histProfile{Class: natSym, Mapped: "1.2.3.4:5"}, Peer: histProfile{Class: natPort, V6: true},
+		Predict: predNo, Actual: "直连", Wrong: true, Via: "5.6.7.8:9", Rounds: 1, TookMs: 120, PunchMs: 80, HandshakeMs: 4400}
+	rec.At, rec.Why = time.Time{}, ""
+	if !reflect.DeepEqual(rec, want) {
+		t.Fatalf("记录不对：\n得到 %+v\n要   %+v", rec, want)
+	}
+	if got := strings.Count(string(printed), "@CHECK {"); got != 1 {
+		t.Fatalf("@CHECK 应输出 1 行，得到 %d：%s", got, printed)
+	}
+	if !strings.Contains(resultLine(want), "QUIC 握手 + 认证 4.4s") || !strings.Contains(resultLine(want), "预测错了") {
+		t.Errorf("结果行：%s", resultLine(want))
+	}
+	// 失败也记，结果行里有原因
+	q := &preflight{role: "recv", ready: make(chan struct{})}
+	q.setMe(profile{Class: natPort})
+	q.sawPeer("nat=sym")
+	q.settle(outcome{actual: "失败", err: "打洞超时", rounds: 6})
+	b, _ = os.ReadFile(historyPath())
+	if n := strings.Count(string(b), "\n"); n != 2 || !strings.Contains(string(b), `"actual":"失败"`) {
+		t.Fatalf("失败没记上：%s", b)
 	}
 }

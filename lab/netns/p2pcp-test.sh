@@ -103,8 +103,13 @@ t_preflight() {
 	grep -q "体检  本机 $ca .*缓存" "$W/pf2-send.log" && grep -q "体检  本机 $cb .*缓存" "$W/pf2-recv.log" && ok "第 2 轮两端都用了缓存" || bad "第 2 轮没用缓存"
 	pa=$(grep -o '→ 预测[^：]*' "$W/pf2-send.log" | head -1) pb=$(grep -o '→ 预测[^：]*' "$W/pf2-recv.log" | head -1)
 	[[ $pa == "→ 预测$want" && $pb == "→ 预测$want" ]] && ok "第 2 轮两端都预测「$want」" || bad "第 2 轮预测不对：A「$pa」B「$pb」，应为 $want"
-	# 第 3 轮：-stun off 当对照。体检和会合并行，不该拖慢建连
+	# 结果行和预测记录（第 5 步）：第 1、2 轮两端各一条，第 3 轮不体检不记
+	local hist=$XDG_CACHE_HOME/p2pcp/history.jsonl
+	grep -q '体检  结果：' "$W/pf2-send.log" && grep -q '体检  结果：' "$W/pf2-recv.log" &&
+		ok "$(grep -o '体检  结果：.*' "$W/pf2-send.log" | cut -c9-)" || bad "没有结果行"
 	pf_round 3 0.3 -stun off
+	[[ $(wc -l <"$hist") == 4 ]] && ! grep -q '"wrong":true' "$hist" && ok "history.jsonl 4 条，预测全对" ||
+		bad "history.jsonl 不对：$(wc -l <"$hist") 条，预测错 $(grep -c '"wrong":true' "$hist") 条"
 	grep -q 体检 "$W/pf3-send.log" && bad "-stun off 还在体检" || ok "-stun off 不体检"
 	t1=$(conn_ms "$W/pf1-send.log") t2=$(conn_ms "$W/pf2-send.log") t3=$(conn_ms "$W/pf3-send.log")
 	# 走中继的组合要等两轮打洞超时，还有偶发的轮次错位（DESIGN 待定），时间抖得厉害，只比直连的

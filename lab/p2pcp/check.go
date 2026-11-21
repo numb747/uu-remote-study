@@ -159,8 +159,8 @@ func probeRelay(bindIP net.IP, relay *net.UDPAddr) (time.Duration, error) {
 	defer l.Close()
 	key := "check-" + randHex(4)
 	errc := make(chan error, 1)
-	go func() { errc <- joinRelay(l, relay, key, "l") }()
-	if err := joinRelay(d, relay, key, "d"); err != nil {
+	go func() { errc <- joinRelay(l, relay, key, "l", nil) }()
+	if err := joinRelay(d, relay, key, "d", nil); err != nil {
 		return 0, err
 	}
 	if err := <-errc; err != nil {
