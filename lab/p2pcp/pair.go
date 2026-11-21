@@ -161,6 +161,7 @@ func cmdJoin(o opts, text string) error {
 
 func reportPaired(o opts, name string, pub []byte) {
 	o.rep.state(fmt.Sprintf("已加好友「%s」（设备 ID %s）", name, deviceID(pub)))
+	o.rep.desktop("P2P 直传：新好友", fmt.Sprintf("已加好友「%s」", name), -1)
 	b, _ := json.Marshal(map[string]string{"name": name, "id": deviceID(pub)})
 	o.rep.line("@PAIRED %s", b)
 }

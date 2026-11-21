@@ -1,14 +1,14 @@
 #!/bin/bash
 # 安装 P2P 直传电脑端：
 #   ~/.local/bin/p2pcp、~/.local/bin/p2p-direct
-#   ~/.config/p2pcp/room              房间密钥（第一次生成；手机 App 构建时读它）
+#   ~/.config/p2pcp/identity.json     设备密钥（p2pcp 第一次运行时自己生成），contacts.json 好友列表
 #   ~/.config/p2pcp/server            会合服务器地址（第一次安装时由 P2P_SERVER 给出；手机 App 构建时也读它）
 #   systemd 用户服务 p2p-direct       常驻接收
-#   启动器「发送到手机（P2P 直传）」、Dolphin 右键「P2P 直传到手机」、图标 p2p-direct
+#   启动器「P2P 直传：发给好友」、Dolphin 右键「P2P 直传给好友」、图标 p2p-direct
 #
 #   P2P_SERVER=1.2.3.4:7001 ./install.sh   第一次安装（服务器端跑 punch server -listen :7001 -relay :3478）
 #   ./install.sh                           更新
-#   ./install.sh uninstall                 卸载（保留房间密钥、服务器地址和已收到的文件）
+#   ./install.sh uninstall                 卸载（保留设备密钥、好友、服务器地址和已收到的文件）
 set -euo pipefail
 cd "$(dirname "$0")"
 APPS=~/.local/share/applications
@@ -25,8 +25,6 @@ if [ "${1:-}" = uninstall ]; then
 fi
 
 mkdir -p ~/.local/bin ~/.config/p2pcp "$APPS" "$MENUS" "$(dirname "$ICON")" "$(dirname "$UNIT")"
-[ -f ~/.config/p2pcp/room ] || head -c 12 /dev/urandom | od -An -tx1 | tr -d ' \n' > ~/.config/p2pcp/room
-chmod 600 ~/.config/p2pcp/room
 [ -n "${P2P_SERVER:-}" ] && echo "$P2P_SERVER" > ~/.config/p2pcp/server
 [ -s ~/.config/p2pcp/server ] || { echo "第一次安装要给出会合服务器：P2P_SERVER=IP:7001 ./install.sh"; exit 1; }
 
@@ -41,11 +39,11 @@ gtk-update-icon-cache -q ~/.local/share/icons/hicolor 2>/dev/null || true
 
 cat > "$UNIT" <<EOF
 [Unit]
-Description=P2P 直传：常驻接收手机发来的文件
+Description=P2P 直传：常驻接收好友发来的文件
 After=graphical-session.target
 
 [Service]
-ExecStart=%h/.local/bin/p2p-direct daemon
+ExecStart=%h/.local/bin/p2p-direct serve
 Restart=always
 RestartSec=3
 
@@ -56,8 +54,8 @@ EOF
 cat > "$APPS/p2p-direct-send.desktop" <<EOF
 [Desktop Entry]
 Type=Application
-Name=发送到手机（P2P 直传）
-Comment=打洞直连，手机在 5G / 外面也能收；手机要开着 P2P 直传 App
+Name=P2P 直传：发给好友
+Comment=打洞直连，对方在 5G / 外面也能收
 Icon=p2p-direct
 Exec=$HOME/.local/bin/p2p-direct send
 Terminal=false
@@ -74,7 +72,7 @@ Actions=p2pSend;
 X-KDE-Priority=TopLevel
 
 [Desktop Action p2pSend]
-Name=P2P 直传到手机
+Name=P2P 直传给好友
 Icon=p2p-direct
 Exec=$HOME/.local/bin/p2p-direct send %F
 EOF

@@ -8,14 +8,14 @@
 #
 # 依赖：/opt/android-sdk/build-tools（pacman: android-sdk-build-tools）、JDK、Go、ImageMagick；
 # android.jar 第一次运行时下载到 ~/.cache/uu-remote-study/android-35/。
-# 房间密钥取 ~/.config/p2pcp/room（电脑端 install.sh 生成），会写进 APK 的 assets。
+# 会合服务器地址取 ~/.config/p2pcp/server（电脑端 install.sh 写的），写进 APK 的 assets。
+# 不再写房间密钥：每台手机第一次打开时自己生成设备密钥，加好友靠邀请码（通讯录模式，lab/p2pcp/pair.go）。
 set -euo pipefail
 cd "$(dirname "$0")"
 BT=${BT:-/opt/android-sdk/build-tools/37.0.0}
 CACHE=~/.cache/uu-remote-study
 JAR=$CACHE/android-35/android.jar
 OUT=out
-ROOM_FILE=~/.config/p2pcp/room
 SERVER=${SERVER:-$(cat ~/.config/p2pcp/server 2>/dev/null || true)}  # 可以是同一台服务器的几个端口，p2pcp 每轮换一个
 
 if [ ! -f "$JAR" ]; then
@@ -23,7 +23,6 @@ if [ ! -f "$JAR" ]; then
 	curl -sSfL -o "$CACHE/platform-35.zip" https://dl.google.com/android/repository/platform-35_r02.zip
 	(cd "$CACHE" && unzip -q -o platform-35.zip)
 fi
-[ -f "$ROOM_FILE" ] || { echo "缺少 $ROOM_FILE，先运行 apps/pc/install.sh"; exit 1; }
 [ -n "$SERVER" ] || { echo "缺少会合服务器地址：SERVER=IP:7001 ./build.sh，或先运行 apps/pc/install.sh"; exit 1; }
 
 rm -rf "$OUT" && mkdir -p "$OUT"/{res,classes,stage/lib/arm64-v8a,assets}
@@ -37,9 +36,9 @@ magick -size 192x192 xc:none -fill '#1a1b26' -draw 'roundrectangle 0,0 191,191 4
 	-fill '#7aa2f7' -font DejaVu-Sans-Bold -pointsize 58 -gravity center -annotate +0-14 'P2P' \
 	-fill '#9ece6a' -pointsize 34 -annotate +0+44 '⇄' "$OUT/resin/mipmap-xxxhdpi/ic_launcher.png"
 "$BT/aapt2" compile --dir "$OUT/resin" -o "$OUT/res/res.zip"
-printf 'room=%s\nserver=%s\n' "$(cat "$ROOM_FILE")" "$SERVER" > "$OUT/assets/config.properties"
+printf 'server=%s\n' "$SERVER" > "$OUT/assets/config.properties"
 "$BT/aapt2" link -o "$OUT/base.apk" -I "$JAR" --manifest AndroidManifest.xml \
-	--min-sdk-version 29 --target-sdk-version 34 --version-code "$(date +%s)" --version-name 0.1 \
+	--min-sdk-version 29 --target-sdk-version 34 --version-code "$(date +%s)" --version-name 0.2 \
 	-A "$OUT/assets" "$OUT/res/res.zip"
 
 # 3. Java → dex

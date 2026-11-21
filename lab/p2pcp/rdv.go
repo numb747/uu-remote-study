@@ -151,6 +151,7 @@ var (
 	errNoRendezvous = errors.New("连不上会合服务器")
 	errRelay        = errors.New("中继没有回应")
 	errStopped      = errors.New("不等了")
+	errNoPeer       = errors.New("对方没上线")
 )
 
 // connectOnce 用一个新 socket 注册、拿对方候选、打洞（或者走中继）。对方的候选 = 服务器看到的公网映射 + 对方自报的
@@ -280,7 +281,11 @@ func connectOnce(o opts, server, rid, id string, wantRelay bool) (*session, erro
 		if o.timeout > 0 && time.Since(start) > o.timeout {
 			unreg()
 			closeAll()
-			return nil, fmt.Errorf("等了 %v，对方没有上线（两端的 p2pcp 版本要一致：v2 起会合协议变了）", o.timeout)
+			if o.friend != "" { // 通讯录模式：说人话，朋友看得懂
+				return nil, fmt.Errorf("%w：等了 %v，「%s」没有上线。对方的 P2P 直传没开着，或者手机熄屏后被系统冻结了"+
+					"（在对方手机的设置里给 P2P 直传打开「允许后台高耗电」/ 关掉电池优化）", errNoPeer, o.timeout, o.friend)
+			}
+			return nil, fmt.Errorf("%w：等了 %v，对方没有上线（两端的 p2pcp 版本要一致：v2 起会合协议变了）", errNoPeer, o.timeout)
 		}
 		// 画像一测好就补一次注册，不等下一个周期（daemon 是 5 秒）：服务器存的是最近一次注册，对方这时来就能拿到 nat=
 		if f := o.pre.flag(); time.Since(lastReg) >= o.regEvery || f != "" && !regHadNat {

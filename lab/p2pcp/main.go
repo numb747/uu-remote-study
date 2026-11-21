@@ -111,6 +111,7 @@ type opts struct {
 	qr        string        // invite -qr：二维码写到这个 PNG（- = 画在终端里）
 	ttl       time.Duration // invite：邀请码有效期
 	serverSet bool          // 命令行给了 -server（send -to 时就不用好友记录里的会合地址）
+	regIdle   time.Duration // 常驻接收空等时的注册间隔（-reg；手机后台拉长省电）
 	rep       *reporter
 }
 
@@ -152,6 +153,8 @@ func main() {
 	fs.StringVar(&o.name, "name", "", "id：改本机的设备名；join：给新好友起名字（默认用对方的设备名）")
 	fs.StringVar(&o.qr, "qr", "", "invite：二维码写成这个 PNG；- = 画在终端里")
 	fs.DurationVar(&o.ttl, "ttl", inviteTTL, "invite：邀请码有效期")
+	fs.DurationVar(&o.regIdle, "reg", 5*time.Second, "serve / daemon / expose：空等时多久注册一次。会合服务器只配 30 秒内注册过的，"+
+		"手机后台可以拉长到 20s 省电（对方来时最多晚一个间隔被配上）")
 	fs.StringVar(&o.listen, "listen", "127.0.0.1:2223", "forward：本地监听地址")
 	fs.DurationVar(&o.timeout, "timeout", 60*time.Second, "等对方的超时（daemon 模式下无效）")
 	progress := fs.Bool("progress", false, "在 stdout 输出机器可读的进度行")
@@ -230,7 +233,7 @@ func main() {
 // 5 秒注册一次就够了（家用路由器映射寿命 60 秒以上，docs/08）。对方一注册，服务器会立刻把 PEER 推过来。
 // o.quit 关闭时退出（serve 删了好友、邀请用掉了）；waiting 为空时不报状态（serve 同时听很多房间，由它统一报）
 func keepServing(o opts, waiting string, accept func(opts) (*link, error), serve func(*link)) {
-	o.timeout, o.regEvery = 0, 5*time.Second
+	o.timeout, o.regEvery = 0, min(max(o.regIdle, time.Second), 25*time.Second)
 	backoff := time.Duration(0)
 	var active atomic.Int32 // 正在服务的对端数：有人在传时不报"等待"，免得盖掉界面上的进度
 	pause := func(d time.Duration) {

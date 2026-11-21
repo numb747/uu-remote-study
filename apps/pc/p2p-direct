@@ -1,36 +1,68 @@
 #!/bin/bash
-# P2P 直传 · 电脑端入口（install.sh 装到 ~/.local/bin/p2p-direct）
+# P2P 直传 · 电脑端入口（install.sh 装到 ~/.local/bin/p2p-direct）。通讯录模式：好友之间的房间密钥由两边的设备密钥算出来
 #
-#   p2p-direct daemon          常驻接收（systemd 用户服务 p2p-direct.service 跑的就是它），存到 ~/Downloads/P2P直传
-#   p2p-direct send [文件...]  发到手机；不带文件就弹选择框（启动器图标、Dolphin 右键都走这里）
+#   p2p-direct serve           常驻接收所有好友发来的文件（systemd 用户服务 p2p-direct.service 跑的就是它），
+#                              存到 ~/Downloads/P2P直传/<好友名>/；也替 invite 等朋友来加好友
+#   p2p-direct send [文件...]  发给好友：不带文件就弹选择框；好友不止一个就弹框选（启动器图标、Dolphin 右键都走这里）
+#   p2p-direct invite          生成邀请码：复制到剪贴板、打开二维码图片，发给朋友或让他扫
+#   p2p-direct join <邀请码>   用朋友给的邀请码加好友
+#   p2p-direct contacts [...]  好友列表（rm 名字 / rename 旧名 新名）
 #
-# 手机要开着「P2P 直传」App 才能收。进度和结果都走桌面通知。
+# 进度和结果都走桌面通知。
 set -euo pipefail
 BIN=~/.local/bin/p2pcp
-ROOM=$(cat ~/.config/p2pcp/room)
-# 会合服务器：p2pcp 自己读 ~/.config/p2pcp/server（install.sh 写的，可以是同一台服务器的几个端口，每轮换一个，
-# docs/09 第 8 节）；P2P_SERVER 可覆盖
+# 会合服务器：p2pcp 自己读 ~/.config/p2pcp/server（install.sh 写的）；好友记录里各自带着加好友时的会合地址。P2P_SERVER 可覆盖
 SRV=(${P2P_SERVER:+-server "$P2P_SERVER"})
 # 开着 sing-box TUN 时，要绑物理网卡的地址才能打洞（否则走的是代理出口）。-bind auto 让 p2pcp 每轮现取 main 表
 # 默认路由那块网卡的地址：换了网络，常驻服务不用重启
+note() { notify-send -a "P2P 直传" -i p2p-direct "$@" || true; }
 
 case ${1:-} in
-daemon)
+serve | daemon) # daemon 是旧名字，旧的 systemd 单元还在用
 	mkdir -p ~/Downloads/P2P直传
-	exec "$BIN" daemon "${SRV[@]}" -room "$ROOM.pc" -bind auto -o ~/Downloads/P2P直传 -notify
+	exec "$BIN" serve "${SRV[@]}" -bind auto -o ~/Downloads/P2P直传 -notify
 	;;
 send)
 	shift
 	files=("$@")
 	if [ ${#files[@]} -eq 0 ]; then
-		mapfile -t files < <(zenity --file-selection --multiple --separator=$'\n' --title "发送到手机（P2P 直传）" 2>/dev/null) || exit 0
+		mapfile -t files < <(zenity --file-selection --multiple --separator=$'\n' --title "P2P 直传：选文件" 2>/dev/null) || exit 0
 	fi
 	[ ${#files[@]} -gt 0 ] || exit 0
-	notify-send -a "P2P 直传" -i p2p-direct "正在连接手机" "请确认手机上「P2P 直传」App 开着" || true
-	exec "$BIN" send "${SRV[@]}" -room "$ROOM.phone" -bind auto -timeout 60s -notify "${files[@]}"
+	mapfile -t names < <("$BIN" contacts -progress | sed -n 's/^@CONTACTS //p' |
+		python3 -c 'import json, sys; [print(c["name"]) for c in (json.load(sys.stdin) or [])]')
+	case ${#names[@]} in
+	0)
+		note "还没有好友" "先在终端运行 p2p-direct invite，把邀请码发给朋友"
+		exit 1
+		;;
+	1) friend=${names[0]} ;;
+	*) friend=$(zenity --list --title "P2P 直传：发给谁" --column 好友 "${names[@]}" 2>/dev/null) || exit 0 ;;
+	esac
+	[ -n "$friend" ] || exit 0
+	note "正在连接「$friend」" "对方的 P2P 直传要开着（手机 App 在后台也行）"
+	exec "$BIN" send "${SRV[@]}" -to "$friend" -bind auto -timeout 60s -notify "${files[@]}"
+	;;
+invite)
+	png=${XDG_RUNTIME_DIR:-/tmp}/p2p-direct-invite.png
+	code=$("$BIN" invite "${SRV[@]}" -qr "$png" -progress | sed -n 's/^@INVITE //p')
+	[ -n "$code" ] || exit 1
+	echo "$code"
+	printf '加我 P2P 直传好友：%s' "$code" | wl-copy 2>/dev/null || true
+	xdg-open "$png" >/dev/null 2>&1 &
+	note "邀请码已复制到剪贴板" "发给朋友（24 小时内有效，用一次就作废），或者让他扫打开的二维码"
+	;;
+join)
+	shift
+	[ $# -eq 1 ] || { echo "用法：p2p-direct join <邀请码>"; exit 2; }
+	"$BIN" join -bind auto "$1" && note "加上好友了" "$("$BIN" contacts | tail -n 1 | cut -c1-40)"
+	;;
+contacts)
+	shift
+	exec "$BIN" contacts "$@"
 	;;
 *)
-	sed -n '2,8p' "$0"
+	sed -n '2,10p' "$0"
 	exit 2
 	;;
 esac
