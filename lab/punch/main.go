@@ -63,6 +63,10 @@ func main() {
 //	  ← /Y <公网映射>     /P <对方 id> <对方公网映射> <对方候选|-> <对方标志|->
 //	  只给角色（id 里 "." 前面那段）不同的两人配对：同一房间可以有多个发送端，它们之间不互相打洞
 //
+// 过滤测试（p2pcp 体检用）：→ /FT <随机数>，服务器从收包的端口回 /F1 <随机数>，再从另一个监听端口回 /F2 <随机数>。
+// 客户端只收到 /F1 = NAT 只放行发过包的 IP:端口（APDF，端口受限锥）；两个都收到 = 同 IP 换端口也能进来（ADF 或 EIF）。
+// 只听一个端口时只回 /F1，客户端判断不了。一个请求换两个小包，照样受按 IP 限速约束
+//
 // 中继（-relay，默认 UDP 3478）：两端在打洞失败后各发 /L <中继键> <d|l>，凑齐两端后回 /LK，此后从一端来的包原样转给另一端。
 // 中继只是转发 UDP，QUIC 的加密和认证仍在两端之间（p2pcp auth.go），服务器看不到内容。
 
@@ -185,6 +189,15 @@ func runServer(args []string) {
 		mu.Unlock()
 	}
 
+	var conns []*net.UDPConn // 所有监听端口，/FT 要从"另一个端口"回包
+	other := func(conn *net.UDPConn) *net.UDPConn {
+		for _, c := range conns {
+			if c != conn {
+				return c
+			}
+		}
+		return nil
+	}
 	serve := func(conn *net.UDPConn) {
 		buf := make([]byte, 1500)
 		for {
@@ -205,6 +218,11 @@ func runServer(args []string) {
 				register(conn, from, f[1], f[2], f[3], "", func(id, pub, lan, _ string) string {
 					return fmt.Sprintf("PEER %s %s %s", id, pub, lan)
 				})
+			case len(f) == 2 && f[0] == "/FT" && len(f[1]) <= 32:
+				conn.WriteToUDP([]byte("/F1 "+f[1]), from)
+				if alt := other(conn); alt != nil {
+					alt.WriteToUDP([]byte("/F2 "+f[1]), from)
+				}
 			case len(f) == 3 && f[0] == "/U2":
 				unregister("v2|"+f[1], f[2])
 			case len(f) == 5 && f[0] == "/R2" && len(f[1]) <= 64 && len(f[2]) <= 40:
@@ -218,19 +236,18 @@ func runServer(args []string) {
 	if *relay != "" {
 		go runRelay(*relay, lim)
 	}
-	addrs := strings.Split(*listen, ",")
-	for i, a := range addrs {
+	for _, a := range strings.Split(*listen, ",") {
 		conn, err := net.ListenUDP("udp", mustResolve(a))
 		if err != nil {
 			log.Fatal(err)
 		}
 		log.Printf("rendezvous listening on %s", conn.LocalAddr())
-		if i == len(addrs)-1 {
-			serve(conn)
-		} else {
-			go serve(conn)
-		}
+		conns = append(conns, conn)
 	}
+	for _, conn := range conns[1:] {
+		go serve(conn)
+	}
+	serve(conns[0])
 }
 
 // relaySess 是一对中继端点：d = 发起连接的一端，l = 等连接的一端
