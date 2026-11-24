@@ -14,10 +14,12 @@ package main
 // 默认用纯 Go 重写的加载器，库里带的 WebView2Loader.dll 不编进来）。
 
 import (
+	"fmt"
 	"log"
 	"os"
 	"path/filepath"
 	"runtime"
+	"runtime/debug"
 	"strings"
 	"syscall"
 	"unsafe"
@@ -131,6 +133,13 @@ func cmdWindow(url string) error {
 		return nil
 	}
 	runtime.LockOSThread() // 窗口、WebView2 的回调都要在建窗口的这个线程上
+	defer func() {
+		// 建窗口、初始化 WebView2 时出了意外：至少用浏览器把界面打开（现场照样进 crash 日志）
+		if r := recover(); r != nil {
+			log.Printf("窗口出错：%v\n%s", r, debug.Stack())
+			fallbackBrowser(url, fmt.Errorf("%v", r))
+		}
+	}()
 	procSetProcessDpiAwareCtx.Call(dpiPerMonitorV2)
 
 	var chromium *edge.Chromium
@@ -195,10 +204,11 @@ func cmdWindow(url string) error {
 	procUpdateWindow.Call(hwnd)
 	log.Printf("开窗口 %s", strings.SplitN(url, "?", 2)[0])
 	procSetForegroundWindow.Call(hwnd)
-	chromium.SetBackgroundColour(0x1a, 0x1b, 0x26, 0xff) // 和网页底色一样，加载时不闪白
 	if !chromium.Embed(hwnd) {
 		return fallbackBrowser(url, nil)
 	}
+	// 下面这些都要 Embed 建好控制器之后才能调（2026-11-24 实机：放在 Embed 前面，空指针，窗口一出来就崩）
+	chromium.SetBackgroundColour(0x1a, 0x1b, 0x26, 0xff) // 和网页底色一样，加载时不闪白
 	if s, err := chromium.GetSettings(); err == nil {
 		s.PutAreDevToolsEnabled(false)
 		s.PutIsStatusBarEnabled(false)
