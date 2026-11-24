@@ -1,10 +1,11 @@
 flowchart LR
   me["我和朋友"]
-  browser["浏览器"]
   subgraph clients["客户端（薄壳，启动 p2pcp、读 -progress 的 @ 行）"]
     android["安卓 App 通讯录模式：好友列表、邀请二维码、粘贴 / 链接加好友、选人发送；前台服务常驻 serve -reg 20s，熄屏要系统放行后台<br/>MainActivity / P2PService"]
-    webui["桌面版 p2pcp app：127.0.0.1 本地网页（HTML 内嵌），通讯录 / 加好友 / 拖文件发送 / 记录 / 诊断；同进程跑 serve，@ 行经 SSE 推给网页；令牌 cookie + Host + Origin 校验，单实例<br/>app.go / app.html"]:::changed
-    osint["系统集成 ×3：开机自启（启动文件夹 / LaunchAgent / systemd）、右键发送（发送到 / Dolphin）、通知"]:::planned
+    webui["桌面版 p2pcp app：127.0.0.1 本地网页（HTML 内嵌），通讯录 / 加好友 / 拖文件发送 / 记录 / 诊断 / 取消；同进程跑 serve，@ 行经 SSE 推给网页；令牌 cookie + Host + Origin 校验，单实例；右键交来的文件（/api/pick）在网页上选好友、从原处发<br/>app.go / app.html"]:::changed
+    win["Windows 集成：双击 P2P直传.exe 自装到 %LOCALAPPDATA%\Programs、开机自启 / 开始菜单 /「发送到」快捷方式、登记卸载；toast 通知（PowerShell）；新版覆盖前先 /api/quit。「发送到」跑 p2pcp sendto：路径交给正在跑的 app（没在跑就拉起来），再打开网页<br/>desktop_windows.go / sendto.go"]:::changed
+    linux["Linux 集成：systemd 用户服务、启动器、Dolphin 右键（zenity 选好友）、notify-send<br/>apps/pc/install.sh、p2p-direct"]
+    mac["macOS 集成：LaunchAgent、osascript 通知、zip 包"]:::planned
   end
   subgraph core["lab/p2pcp（Go，四个平台共用）"]
     cli["新命令：id / invite / join / contacts / send -to / serve；二维码 rsc.io/qr（PNG / 终端）"]
@@ -12,25 +13,27 @@ flowchart LR
     pair["加好友：邀请码编解码、互换名片、配对密钥 HKDF(ECDH)<br/>contacts.go / pair.go"]
     xfer["传文件：体检、打洞、续传、后台升级<br/>sendSession / recvSession"]
   end
-  identity["设备身份：X25519 私钥 + 设备名<br/>identity.json"]
-  store["通讯录：好友 + 待用邀请<br/>contacts.json"]
+  store["设备身份（X25519 私钥 + 设备名）、通讯录（好友 + 待用邀请）<br/>identity.json / contacts.json"]
   rdv["会合 + 中继 99-server"]
-  diag["诊断：原因码 + 一句人话（@REASON）、每次连接的过程记录 trace/、诊断报告 p2pcp report（名字打码）、日志落盘、崩溃现场；结束时 /H 上报，没回执进本机队列<br/>reason.go / trace.go / diag.go / upload.go"]:::changed
-  collector["上报收集：会合端口收 /H、回 /HK，写 reports.jsonl（不进 git）；report-stats.py 按 NAT 组合 / 原因码汇总<br/>punch server -reports"]:::changed
+  diag["诊断：原因码 + 一句人话（@REASON）、每次连接的过程记录 trace/、诊断报告 p2pcp report（名字打码）、日志落盘、崩溃现场；结束时 /H 上报，没回执进本机队列<br/>reason.go / trace.go / diag.go / upload.go"]
+  collector["上报收集：会合端口收 /H、回 /HK，写 reports.jsonl（不进 git）；report-stats.py 按 NAT 组合 / 原因码汇总<br/>punch server -reports"]
   release["发布：GitHub Releases（APK 固定签名、Windows / macOS zip、Linux tar），启动时查新版本"]:::planned
 
   me -->|"点按钮、选文件"| android
-  me -->|"打开网页"| browser
-  browser -->|"HTTP 127.0.0.1"| webui
-  me -->|"右键发送"| osint
-  osint -->|"启动 p2pcp send -to / app"| cli
+  me -->|"浏览器打开 127.0.0.1"| webui
+  me -->|"右键「发送到」"| win
+  me -->|"Dolphin 右键"| linux
+  win -->|"开机自启 app -no-browser"| webui
+  win -->|"发送到：POST /api/pick（app.json 里的令牌）"| webui
+  linux -->|"systemd 跑 app；右键 send -to"| cli
+  mac -.-> webui
   android -->|"ProcessBuilder，-config 指向 App 目录"| cli
   webui -->|"同一进程里调用"| cli
   cli --> pair
   cli --> serve
   cli -->|"send -to：配对密钥当房间密钥"| xfer
   serve -->|"每个房间 recvSession"| xfer
-  pair -->|"读私钥"| identity
+  pair -->|"读私钥"| store
   pair -->|"写好友"| store
   serve -->|"读好友列表"| store
   xfer -->|"/R2、中继 /L"| rdv
@@ -46,6 +49,8 @@ flowchart LR
 %% @src pair lab/p2pcp/contacts.go func pairSecret(
 %% @src rdv lab/punch/main.go func runServer
 %% @src webui lab/p2pcp/app.go func cmdApp(
+%% @src win lab/p2pcp/desktop_windows.go func install(
+%% @src linux apps/pc/install.sh UNIT=~/.config/systemd/user/p2p-direct.service
 %% @src diag lab/p2pcp/reason.go func reasonOf(
 %% @src collector lab/punch/main.go func reportSink(
 %% @link pair 27-flow-pairing.mmd
