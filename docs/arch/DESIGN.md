@@ -44,6 +44,11 @@
 31. **诊断报告打码靠登记**：`send` 一开始（在检查文件之前，出错的日志里也有文件名）、接收时一拿到文件名、加好友 / 解析好友时，把文件名、完整路径、好友名追加进缓存目录的 `names.txt`；`p2pcp report` 读它和通讯录，长的先换：本机设备名 →「本机」、好友 →「好友N」、文件 →「<文件N.扩展名>」（完整路径和文件名对到同一个代号）。少于 2 个字的名字不打码（会误伤正文）。本机体检另起一个子进程跑 `p2pcp check`，收下它的输出。
 32. **安卓的诊断报告存进「下载/P2P直传」再分享**：没有 Gradle 就没有 androidx 的 FileProvider，MediaStore 的 Uri 可以直接带读权限分享，用户也能在文件管理器里找到。另外 App 启动 p2pcp 时传 `TZ`（Go 在安卓上不认系统时区，默认 UTC），p2pcp 嵌入 `time/tzdata`（约 450KB），日志和报告里的时间和电脑那边对得上。
 
+33. **传输中可以手动取消，两边都有按钮。**（用户定，2026-11-24：真机上发 2.5GB 时停不下来）「取消」和「中断」分开：中断（断网、换网、Ctrl-C、进程被杀）照旧重连续传、留半成品；取消是用户点的按钮，两边都停、发送端不重连、接收端**删掉半成品**（用户没选 A/B，先按「删掉」做，要改成留着续传只动 `recvFile` 里的一个 defer）。界面上取消不算失败：灰字「已取消 / 对方取消了」，不弹红色失败、不带原因码动作。
+34. **怎么让对方知道：QUIC 应用错误码 `0x43`（`codeCanceled`）关掉这个会话的所有连接。**（默认）对方在任何一个流操作上都会拿到 Remote 的 `ApplicationError`，不用在控制流上加消息、也不用对方正好在读控制流。旧版对端看到的是普通断开（当成中断），新版之间才认得出。机器行加 `@CANCELED me|peer <文字>`；history / 上报记成 `canceled` / `peer_canceled`。
+35. **接收端取消时 CONNECTION_CLOSE 可能丢：靠发送号兜底。**（默认）每次 `send` 随机一个发送号（offer 的 `sid`，重连续传时不变）；接收端取消时记下它（10 分钟），发送端当成中断重连过来、拿同一个发送号 offer，就回 `{"t":"cancel"}` 并用 `codeCanceled` 关连接（光回消息不够：紧接着关连接，没发出的流数据会丢——netns 抓到的）。重新发同一个文件是新的发送号，照收。发送端取消时丢了包没关系：接收端 15 秒空闲超时后当成中断，半成品一周后清掉。
+36. **谁来叫取消**（默认）：`cancel.go` 里有一张正在进行的传输表（发送一次 `send` 一项，接收一个好友的一次会话一项，升级到直连后还是同一项）。桌面版网页在同一进程里调 `/api/cancel`（`{"ch":"send:N"}` 或 `{"ch":"recv"}`）；手机 App 往 p2pcp 的 stdin 写一行 `cancel` / `cancel recv`（带 `-progress` 时才读 stdin，systemd 给的 `/dev/null` 读到头就不读了）。接收端的取消先只做「取消正在收的（所有好友的）」：界面上本来就只显示一个接收进度，按好友分开等好友多了再说。网页上文件还在交给 p2pcp（上传到临时目录）时取消就是中止上传；App 还在复制到缓存时取消就停止复制。
+
 ## 待定
 
 - **macOS 的 Gatekeeper / Windows 的 SmartScreen**：没有签名的程序第一次打开会被拦。倾向不花钱买证书，在给朋友的说明里写清「右键 → 打开」（macOS）/「仍要运行」（Windows）。
@@ -82,6 +87,8 @@ iPhone、一对多 / 群发、账号和中心化的好友目录、网页版（�
     - 收发记录：先只在内存里留最近几十条，网页刷新时拉一次；要不要落盘等用起来再说。
     - Linux 集成：`install.sh` 的 systemd 单元改成跑 `p2pcp app -no-browser -o ~/Downloads/P2P直传 -bind auto -notify`（代替 `p2p-direct serve`），启动器加一个「P2P 直传」打开网页（`p2pcp app` 发现已有实例就开浏览器）。现有 `p2p-direct send / invite / join` 照旧能用（它们是独立进程，和 app 共用 `~/.config/p2pcp`）。
     - 为第 5、6 步留意：Windows 现在只卡在 `main.go` 的 `syscall.Kill`（`exitGracefully`），拆到 `_unix.go` / `_windows.go` 就行；macOS 已能编过。`defaultRoute` / `defaultRouteIP` 读 `/proc/net/route`，在 Windows / macOS 上返回空，`-bind auto` 就退化成不绑定（没有 TUN 代理时没问题）。
+- [x] **4.5 手动取消**（用户定：2026-11-24 插在第 5 步前面，决策 33~36）。（2026-11-24：单元测试原因码归类（本机 / 对方取消、对方普通退出不算取消）、发送号记忆和过期、取消表按方向 / 好友挑；netns 新用例 cancel 在 port↔port、sym↔sym（走中继）、full↔sym 都是 15/15：发送端 stdin 写 cancel 后 0 秒退出、报 @CANCELED me、不重连，接收端报 @CANCELED peer、半成品删掉，history 记 canceled / peer_canceled；接收端取消后发送端 0~1 秒退出、报 @CANCELED peer，常驻接收不退出；接收端取消时把两个 NAT 之间和中继都封 2 秒（CONNECTION_CLOSE 丢掉），发送端 15 秒空闲超时后重连，接收端按发送号回 cancel，发送端报 @CANCELED peer。netns 抓到两个问题已修：接收端的错误文字是 %v 拼的、包不住对方的 ApplicationError（改成在 recvFile 的 defer 里统一换成 canceledErr）；回 cancel 后马上关连接会把这条消息丢掉（改成用 codeCanceled 关）。本机两个 app 实例 + 本机会合服务器，在真浏览器里：发送中「取消」按钮出现，点了 0 秒「已取消」、对方页面「对方取消了」、半成品删掉；接收方点「取消」先确认，再两边都停。reviewer 审查后：取消时停掉边发边算的 sha256（否则 2.5GB 取消后还要读完一遍）、删半成品时拿着 inFile 的锁（迟到的块不再把 .json 写回来）。真机（电脑 Wi-Fi ↔ 手机 V2238A）：电脑 `send -to` 发 200MB、用户在手机上点「取消」→「取消接收」，这次走的中继，电脑 1 秒内退出、报「对方取消了」，手机灰字「已取消 · 收了一半的部分已删掉」；电脑这边 stdin 写 cancel，手机马上显示「对方取消了」。真机测出一个问题已修：进程刚起、还没开始发就收到 cancel 会被丢掉（App 一起来就点取消时会这样），改成记下来、send 一登记就取消。全部回归 port↔port、full↔sym 79/79，port↔sym、sym↔sym 66/68（只有已知的 tunnel 2 项）；修完之后 send / resume / reconn / pair / cancel 在 port↔port、sym↔sym 再跑 30/30。电脑 `p2p-direct` 和手机 App 都已装成新版。**还没测**：手机当发送端时在 App 里点取消；旧发送端 + 新接收端取消时，旧发送端会重连、从头重发（它的 offer 没有发送号，见决策 35），两边一起升级就没事）
+  - 文件：新建 `lab/p2pcp/cancel.go`（错误码、取消表、发送号记忆、stdin 命令）；`transfer.go` 的 send / recv 接上取消；`link.go` 加 `closeWith`；`report.go` 的 `@CANCELED`；`reason.go` 的 `canceled` / `peer_canceled`；`app.go` 的 `/api/cancel` 和 `@END`；`app.html` 两张卡片的「取消」按钮；安卓 `MainActivity` 两个面板的「取消」、`P2PService.cancelRecv`、`P2p.command`。
 - [ ] **5. Windows 版**：交叉编译、「发送到」、启动文件夹、toast 通知、防火墙首次放行提示。验证：wine 冒烟 + 实机测（待定）。
 - [ ] **6. macOS 版**：LaunchAgent、`osascript` 通知、zip 包和打开说明。验证：交叉编译 + 实机测（待定）。
 - [ ] **7. 发布**：固定签名、一条命令打出四个平台的包、GitHub Releases、启动时查新版本、给朋友的中文上手说明。
