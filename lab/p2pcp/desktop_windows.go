@@ -27,6 +27,7 @@ import (
 	"syscall"
 	"time"
 	"unicode/utf16"
+	"unsafe"
 
 	"golang.org/x/sys/windows"
 	"golang.org/x/sys/windows/registry"
@@ -101,8 +102,9 @@ func startDetached(args ...string) error {
 func startExe(exe string, args ...string) error {
 	cmd := exec.Command(exe, args...)
 	cmd.Dir = filepath.Dir(exe)
-	cmd.SysProcAttr = &syscall.SysProcAttr{HideWindow: true,
-		CreationFlags: windows.DETACHED_PROCESS | windows.CREATE_NEW_PROCESS_GROUP}
+	// 不能设 HideWindow：子进程第一次 ShowWindow 会照父进程给的 SW_HIDE 来，窗口建好了却一直看不见
+	// （2026-11-24 实机：双击后只有后台进程、没有窗口）。P2P直传.exe 是 GUI 程序，本来就没有黑框要藏
+	cmd.SysProcAttr = &syscall.SysProcAttr{CreationFlags: windows.DETACHED_PROCESS | windows.CREATE_NEW_PROCESS_GROUP}
 	if err := cmd.Start(); err != nil {
 		return err
 	}
@@ -175,13 +177,47 @@ func stopApp(o opts) {
 	}
 }
 
+// stopInstalled：停掉所有从安装目录运行的 P2P直传.exe（app 先好好退，窗口进程、卡住的旧进程直接结束），
+// 不然 exe 被占着，覆盖、删除都不行
+func stopInstalled(o opts, dst string) {
+	stopApp(o)
+	snap, err := windows.CreateToolhelp32Snapshot(windows.TH32CS_SNAPPROCESS, 0)
+	if err != nil {
+		return
+	}
+	defer windows.CloseHandle(snap)
+	var hs []windows.Handle
+	e := windows.ProcessEntry32{Size: uint32(unsafe.Sizeof(windows.ProcessEntry32{}))}
+	for err = windows.Process32First(snap, &e); err == nil; err = windows.Process32Next(snap, &e) {
+		if e.ProcessID == uint32(os.Getpid()) || !strings.EqualFold(windows.UTF16ToString(e.ExeFile[:]), exeName) {
+			continue
+		}
+		h, err := windows.OpenProcess(windows.PROCESS_TERMINATE|windows.PROCESS_QUERY_LIMITED_INFORMATION|windows.SYNCHRONIZE, false, e.ProcessID)
+		if err != nil {
+			continue
+		}
+		buf := make([]uint16, windows.MAX_LONG_PATH)
+		n := uint32(len(buf))
+		if windows.QueryFullProcessImageName(h, 0, &buf[0], &n) == nil && strings.EqualFold(windows.UTF16ToString(buf[:n]), dst) {
+			windows.TerminateProcess(h, 1)
+			hs = append(hs, h)
+			continue
+		}
+		windows.CloseHandle(h)
+	}
+	for _, h := range hs {
+		windows.WaitForSingleObject(h, 3000)
+		windows.CloseHandle(h)
+	}
+}
+
 func install(o opts, self, dst string) error {
 	dir := filepath.Dir(dst)
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return err
 	}
 	if !bytes.Equal(fileSum(self), fileSum(dst)) {
-		stopApp(o) // 旧版在跑：exe 被占着，覆盖不了
+		stopInstalled(o, dst) // 旧版在跑：exe 被占着，覆盖不了
 		data, err := os.ReadFile(self)
 		if err != nil {
 			return err
@@ -238,7 +274,8 @@ Set-ItemProperty -Path $a -Name IconUri -Value $ico
 
 // cmdUninstall：「应用和功能」里点卸载
 func cmdUninstall(o opts) error {
-	stopApp(o)
+	dir := installDir()
+	stopInstalled(o, filepath.Join(dir, exeName))
 	script := fmt.Sprintf(`foreach ($f in 'Startup', 'Programs', 'SendTo') {
   Remove-Item -LiteralPath (Join-Path ([Environment]::GetFolderPath($f)) 'P2P 直传.lnk') -ErrorAction SilentlyContinue
 }
@@ -251,7 +288,6 @@ Remove-Item -Path 'HKCU:\%s' -Recurse -ErrorAction SilentlyContinue
 	}
 	msgBox("P2P 直传已卸载。\n\n设备密钥和好友（"+configDir(o)+"）、收到的文件（"+defaultOut()+"）都还在，不要了可以自己删。", false)
 	// 自己正在运行，删不掉自己：交给一个隐藏的 cmd，等这边退出后再删安装目录
-	dir := installDir()
 	if self, err := os.Executable(); err == nil && strings.EqualFold(filepath.Dir(filepath.Clean(self)), filepath.Clean(dir)) {
 		// 命令行要原样交给 cmd（CmdLine）：Go 默认把参数里的引号转义成 \"，cmd 不认
 		cmd := exec.Command("cmd.exe")
@@ -270,8 +306,8 @@ Remove-Item -Path 'HKCU:\%s' -Recurse -ErrorAction SilentlyContinue
 func pngToICO(png []byte) []byte {
 	var b bytes.Buffer
 	binary.Write(&b, binary.LittleEndian, [3]uint16{0, 1, 1}) // 保留、类型 1 = 图标、1 张
-	b.Write([]byte{0, 0, 0, 0})                              // 宽高 0 = 256，调色板 0，保留
-	binary.Write(&b, binary.LittleEndian, [2]uint16{1, 32})  // 颜色平面、每像素位数
+	b.Write([]byte{0, 0, 0, 0})                               // 宽高 0 = 256，调色板 0，保留
+	binary.Write(&b, binary.LittleEndian, [2]uint16{1, 32})   // 颜色平面、每像素位数
 	binary.Write(&b, binary.LittleEndian, [2]uint32{uint32(len(png)), 22})
 	b.Write(png)
 	return b.Bytes()

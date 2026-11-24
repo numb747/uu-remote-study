@@ -18,6 +18,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"strings"
 	"syscall"
 	"unsafe"
 
@@ -42,6 +43,7 @@ var (
 	procSetForegroundWindow    = user32.NewProc("SetForegroundWindow")
 	procFindWindowW            = user32.NewProc("FindWindowW")
 	procIsIconic               = user32.NewProc("IsIconic")
+	procIsWindowVisible        = user32.NewProc("IsWindowVisible")
 	procLoadCursorW            = user32.NewProc("LoadCursorW")
 	procGetDpiForSystem        = user32.NewProc("GetDpiForSystem")
 	procSetProcessDpiAwareCtx  = user32.NewProc("SetProcessDpiAwarenessContext")
@@ -58,6 +60,7 @@ const (
 	wsOverlapped     = 0x00CF0000 // WS_OVERLAPPEDWINDOW
 	cwUseDefault     = 0x80000000
 	swShow           = 5
+	swShowNormal     = 1
 	swRestore        = 9
 	idcArrow         = 32512
 	colorWindow      = 5
@@ -94,6 +97,8 @@ func findWindow() uintptr {
 func raise(h uintptr) {
 	if iconic, _, _ := procIsIconic.Call(h); iconic != 0 {
 		procShowWindow.Call(h, swRestore)
+	} else if vis, _, _ := procIsWindowVisible.Call(h); vis == 0 {
+		procShowWindow.Call(h, swShow) // 被藏起来的（旧版的窗口进程就会这样）也要显示出来
 	}
 	procSetForegroundWindow.Call(h)
 }
@@ -186,8 +191,9 @@ func cmdWindow(url string) error {
 			procPostMessageW.Call(hwnd, wmClose, 0, 0)
 		}
 	}
-	procShowWindow.Call(hwnd, swShow)
+	procShowWindow.Call(hwnd, swShowNormal)
 	procUpdateWindow.Call(hwnd)
+	log.Printf("开窗口 %s", strings.SplitN(url, "?", 2)[0])
 	procSetForegroundWindow.Call(hwnd)
 	chromium.SetBackgroundColour(0x1a, 0x1b, 0x26, 0xff) // 和网页底色一样，加载时不闪白
 	if !chromium.Embed(hwnd) {

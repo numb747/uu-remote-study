@@ -217,7 +217,7 @@ func main() {
 	}
 	o.rep = &reporter{machine: *progress, notify: *notify}
 	o.regEvery = 500 * time.Millisecond
-	if role != "id" && role != "contacts" && role != "sendto" && role != "window" && os.Getenv("P2PCP_NO_LOG") == "" {
+	if role != "id" && role != "contacts" && os.Getenv("P2PCP_NO_LOG") == "" {
 		setupLog(role) // 日志落盘（diag.go），诊断报告要用
 	}
 	setupCrash(o.rep)
