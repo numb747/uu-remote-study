@@ -41,6 +41,9 @@
   .modal img { width:100%; image-rendering:pixelated; border-radius:8px; background:#fff; }
   textarea, input[type=text] { width:100%; font:inherit; background:var(--bg); color:var(--fg); border:1px solid var(--line); border-radius:8px; padding:10px; }
   .code { word-break:break-all; font:13px ui-monospace, monospace; background:var(--bg); padding:8px; border-radius:8px; margin:10px 0; user-select:all; }
+  .card.pick { outline:2px solid var(--blue); }
+  button.small.blue { background:var(--blue); color:var(--bg); font-weight:600; }
+  .card.hint { border-left:4px solid var(--blue); font-size:14px; }
   #toast { position:fixed; left:50%; bottom:28px; transform:translateX(-50%); background:var(--line); padding:10px 18px; border-radius:10px; display:none; }
 </style>
 </head>
@@ -51,6 +54,17 @@
   <div class="row">
     <button class="big blue" id="inviteBtn">邀请好友</button>
     <button class="big green" id="joinBtn">加好友</button>
+  </div>
+
+  <div class="card hint" id="fwHint" hidden>
+    第一次运行时 Windows 可能会弹「Windows 安全中心警报」，问要不要允许 P2P直传 访问网络：<b>点「允许」</b>（专用、公用网络都勾上）。
+    点了「取消」也多半能用，但走直连的机会少一些。<span class="link" id="fwOk">知道了</span>
+  </div>
+
+  <div class="card pick" id="pickCard" hidden>
+    <div class="head"><h2>要发送的文件（右键「发送到」交过来的）</h2><span class="link" id="pickDrop">不发了</span></div>
+    <div class="state" id="pickWhat"></div>
+    <div class="dim">点下面好友的「发给他」</div>
   </div>
 
   <div class="card">
@@ -66,7 +80,7 @@
   </div>
 
   <div class="card" id="recvCard">
-    <div class="head"><h2>接收（后台常驻，存到 <span id="out"></span>/好友名）</h2><button class="cancel" id="recvCancel">取消</button></div>
+    <div class="head"><h2>接收（后台常驻，存到 <span id="out"></span>）</h2><button class="cancel" id="recvCancel">取消</button></div>
     <div class="state" id="recvState">—</div>
     <div class="bar"><div id="recvBar"></div></div>
     <div class="detail" id="recvDetail"></div>
@@ -130,8 +144,16 @@ async function refresh() {
   state = await (await fetch('/api/state')).json();
   $('me').textContent = `${state.me.name} · ID ${state.me.id}`;
   $('ver').textContent = 'p2pcp ' + state.version;
-  $('out').textContent = state.out;
+  $('out').textContent = state.out + (state.os === 'windows' ? '\\' : '/') + '好友名';
   $('upload').textContent = state.upload ? '开（点这里关掉）' : '关（点这里打开）';
+  $('fwHint').hidden = !(state.os === 'windows' && !localStorage.fwOk);
+  const pk = state.picks.length ? state.picks[state.picks.length - 1] : null; // 右键交过来的，最新的那批
+  $('pickCard').hidden = !pk;
+  if (pk) {
+    const n = pk.names.length;
+    $('pickWhat').textContent = (n === 1 ? pk.names[0] : `${pk.names[0]} 等 ${n} 个文件`) + `（${(pk.size / 1e6).toFixed(1)} MB）`;
+    $('pickDrop').onclick = async () => { await post('/api/unpick', { id: pk.id }).catch(() => {}); refresh(); };
+  }
   const box = $('friends');
   box.innerHTML = '';
   if (!state.friends.length) box.innerHTML = '<div class="dim" style="padding:8px 0">还没有好友：点「邀请好友」把邀请码发给朋友，或者点「加好友」粘贴朋友给你的邀请码。</div>';
@@ -139,8 +161,9 @@ async function refresh() {
     const row = document.createElement('div');
     row.className = 'friend';
     row.innerHTML = `<span class="name">${esc(f.name)}</span><span class="dim">${esc(f.id)}</span>
-      <button class="small" data-act="send">发送文件…</button><button class="small" data-act="more">⋯</button>`;
-    row.querySelector('[data-act=send]').onclick = () => { pickFor = f.name; $('picker').value = ''; $('picker').click(); };
+      <button class="small${pk ? ' blue' : ''}" data-act="send">${pk ? '发给他' : '发送文件…'}</button><button class="small" data-act="more">⋯</button>`;
+    row.querySelector('[data-act=send]').onclick = pk ? () => sendPick(f.name, pk)
+      : () => { pickFor = f.name; $('picker').value = ''; $('picker').click(); };
     row.querySelector('[data-act=more]').onclick = () => friendMenu(f.name);
     row.ondragover = e => { e.preventDefault(); row.classList.add('drop'); };
     row.ondragleave = () => row.classList.remove('drop');
@@ -192,6 +215,17 @@ function sendFiles(friend, files) {
   x.onabort = () => { setPanel('send', '已取消', 'off', 0, ''); curSend = null; showCancel('send', false); };
   x.send(fd);
 }
+
+// 右键「发送到」交过来的文件：不用再传一遍，直接从原处发
+async function sendPick(friend, pk) {
+  try {
+    const j = await post('/api/send', { friend, pick: pk.id });
+    sendTo[j.ch] = j.friend; curSend = { ch: j.ch }; showCancel('send', true);
+    setPanel('send', `连接 ${j.friend}……`, '', 0, '');
+  } catch (e) { setPanel('send', '失败：' + (e.human || e.error), 'bad', 0, e.action || ''); }
+  refresh();
+}
+$('fwOk').onclick = () => { localStorage.fwOk = 1; $('fwHint').hidden = true; };
 
 function showCancel(which, on) { $(which + 'Cancel').classList.toggle('on', on); }
 $('sendCancel').onclick = async () => {
@@ -292,6 +326,9 @@ function handle(e, live) {
       addRecord(e.at, `<span style="color:var(--red)">${which === 'send' ? '发给 ' + esc(sendTo[ch] || '') + ' 失败' : '接收失败'}</span>：${esc(r ? r.human : err)}`);
       break;
     }
+    case '@PICK': // 右键「发送到」交来了文件
+      refresh().then(() => { scrollTo(0, 0); if (live) toast('选一个好友，点「发给他」'); });
+      break;
     case '@PAIRED':
       if (live) { toast('加上新好友了'); $('inviteDlg').classList.remove('on'); }
       refresh();

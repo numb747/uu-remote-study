@@ -168,7 +168,8 @@ func cmdApp(o opts, noBrowser bool) error {
 	if err := writeJSON(appInfoPath(cfg), info); err != nil {
 		return withReason(rsnLocal, err)
 	}
-	a := &app{o: o, cfg: cfg, info: info, h: &hub{subs: map[chan appEvent]bool{}}}
+	a := &app{o: o, cfg: cfg, info: info, h: &hub{subs: map[chan appEvent]bool{}}, picks: map[string]*pick{}}
+	toastLaunch = info.url() // Windows：点通知打开网页（notify_windows.go）
 	// 常驻接收：和 p2pcp serve 一样，进度推给网页
 	ro := o
 	ro.rep = &reporter{notify: o.rep.notify, sink: a.h.pub("recv")}
@@ -191,7 +192,21 @@ type app struct {
 	info  appInfo
 	h     *hub
 	sends atomic.Int64
+
+	pickMu sync.Mutex
+	picks  map[string]*pick
 }
+
+// pick：右键「发送到」交过来、还没选好友的文件（sendto.go）。路径留在服务端，网页只拿到编号和文件名
+type pick struct {
+	ID    string   `json:"id"`
+	Names []string `json:"names"`
+	Size  int64    `json:"size"`
+	paths []string
+	at    time.Time
+}
+
+const pickTTL = time.Hour
 
 // ---------------- HTTP ----------------
 
@@ -205,6 +220,9 @@ func (a *app) routes() http.Handler {
 	mux.HandleFunc("POST /api/join", a.join)
 	mux.HandleFunc("POST /api/send", a.send)
 	mux.HandleFunc("POST /api/cancel", a.cancel)
+	mux.HandleFunc("POST /api/pick", a.pick)
+	mux.HandleFunc("POST /api/unpick", a.unpick)
+	mux.HandleFunc("POST /api/quit", a.quit)
 	mux.HandleFunc("POST /api/me", a.rename)
 	mux.HandleFunc("POST /api/friend", a.friend)
 	mux.HandleFunc("POST /api/upload", a.upload)
@@ -309,7 +327,7 @@ func (a *app) state(w http.ResponseWriter, r *http.Request) {
 		"me":      map[string]string{"name": id.Name, "id": deviceID(id.pub())},
 		"friends": fs, "invites": len(liveInvites(b.Invites)),
 		"upload": loadSettings(a.cfg).uploadOn(), "version": version, "out": a.o.out,
-		"events": recent,
+		"events": recent, "picks": a.livePicks(), "os": runtime.GOOS,
 	})
 }
 
@@ -378,8 +396,34 @@ func (a *app) join(w http.ResponseWriter, r *http.Request) {
 	writeJSONResp(w, map[string]string{"name": name})
 }
 
-// send：网页选的文件先经 HTTP 传进本机的临时目录（和安卓 App 先复制到缓存一样），再在后台发；马上返回发送号
+// send：网页选的文件先经 HTTP 传进本机的临时目录（和安卓 App 先复制到缓存一样），再在后台发；马上返回发送号。
+// 右键「发送到」交过来的文件（{"friend","pick"}）不用复制，直接从原处发
 func (a *app) send(w http.ResponseWriter, r *http.Request) {
+	if strings.HasPrefix(r.Header.Get("Content-Type"), "application/json") {
+		var req struct{ Friend, Pick string }
+		if err := readBody(r, &req); err != nil {
+			httpFail(w, err)
+			return
+		}
+		a.pickMu.Lock() // 取出就作废：「发给他」连点两下不会发两遍
+		p := a.picks[req.Pick]
+		delete(a.picks, req.Pick)
+		a.pickMu.Unlock()
+		if p == nil {
+			httpFail(w, errors.New("要发的文件找不到了（超过一小时，或者已经发过）：重新右键发送"))
+			return
+		}
+		ch, friend, err := a.startSend(req.Friend, p.paths, func() {})
+		if err != nil {
+			a.pickMu.Lock() // 没发起来（好友名不对之类）：放回去，还能再选
+			a.picks[p.ID] = p
+			a.pickMu.Unlock()
+			httpFail(w, err)
+			return
+		}
+		writeJSONResp(w, map[string]string{"ch": ch, "friend": friend})
+		return
+	}
 	mr, err := r.MultipartReader()
 	if err != nil {
 		httpFail(w, err)
@@ -437,26 +481,116 @@ func (a *app) send(w http.ResponseWriter, r *http.Request) {
 		httpFail(w, errors.New("要选好友和文件"))
 		return
 	}
-	o := a.o
-	o.friend = friend
-	if err := resolveFriend(&o, "send"); err != nil {
+	ch, friend, err := a.startSend(friend, paths, cleanup)
+	if err != nil {
 		cleanup()
 		httpFail(w, err)
 		return
 	}
-	ch := fmt.Sprintf("send:%d", a.sends.Add(1))
+	writeJSONResp(w, map[string]string{"ch": ch, "friend": friend})
+}
+
+// startSend 在后台发给好友，返回发送号和好友的全名；发完调 done
+func (a *app) startSend(friend string, paths []string, done func()) (ch, name string, err error) {
+	if friend == "" || len(paths) == 0 {
+		return "", "", errors.New("要选好友和文件")
+	}
+	o := a.o
+	o.friend = friend
+	if err := resolveFriend(&o, "send"); err != nil {
+		return "", "", err
+	}
+	ch = fmt.Sprintf("send:%d", a.sends.Add(1))
 	o.rep = &reporter{notify: a.o.rep.notify, sink: a.h.pub(ch)}
 	o.x = newXfer(ch, "send", o.friend) // 网页上的「取消」按发送号找它（cancel.go）
 	o.rep.line("@TO %s", o.friend)
 	go func() {
-		defer cleanup()
+		defer done()
 		defer o.x.end()
 		if err := send(o, paths); err != nil {
 			o.rep.fail(err)
 		}
 		o.rep.line("@END") // 这次发送结束了（成功、失败、取消都有）：网页收起「取消」按钮
 	}()
-	writeJSONResp(w, map[string]string{"ch": ch, "friend": o.friend})
+	return ch, o.friend, nil
+}
+
+// pick：{"paths":[…]} 登记右键「发送到」的文件（只有本机读得到 app.json 里令牌的程序能调），回编号；
+// 打开着的网页经 SSE 收到 @PICK，弹出「发给谁」
+func (a *app) pick(w http.ResponseWriter, r *http.Request) {
+	var req struct{ Paths []string }
+	if err := readBody(r, &req); err != nil {
+		httpFail(w, err)
+		return
+	}
+	p := &pick{ID: randHex(6), at: time.Now()}
+	for _, path := range req.Paths {
+		st, err := os.Stat(path)
+		if err != nil {
+			httpFail(w, withReason(rsnLocal, err))
+			return
+		}
+		if !st.Mode().IsRegular() {
+			httpFail(w, withReason(rsnLocal, fmt.Errorf("%s %w", path, errNotRegular)))
+			return
+		}
+		noteFile(path)
+		p.paths = append(p.paths, path)
+		p.Names = append(p.Names, filepath.Base(path))
+		p.Size += st.Size()
+	}
+	if len(p.paths) == 0 {
+		httpFail(w, errors.New("没有文件"))
+		return
+	}
+	a.pickMu.Lock()
+	a.picks[p.ID] = p
+	a.pickMu.Unlock()
+	a.h.send("pick", "@PICK "+p.ID, false)
+	writeJSONResp(w, map[string]string{"id": p.ID})
+}
+
+func (a *app) unpick(w http.ResponseWriter, r *http.Request) {
+	var req struct{ ID string }
+	if err := readBody(r, &req); err != nil {
+		httpFail(w, err)
+		return
+	}
+	a.dropPick(req.ID)
+	writeJSONResp(w, map[string]bool{"ok": true})
+}
+
+func (a *app) dropPick(id string) {
+	a.pickMu.Lock()
+	delete(a.picks, id)
+	a.pickMu.Unlock()
+}
+
+// livePicks：还没过期的，先来的在前；过期的顺手删掉
+func (a *app) livePicks() []*pick {
+	a.pickMu.Lock()
+	defer a.pickMu.Unlock()
+	out := []*pick{}
+	for id, p := range a.picks {
+		if time.Since(p.at) > pickTTL {
+			delete(a.picks, id)
+			continue
+		}
+		out = append(out, p)
+	}
+	slices.SortFunc(out, func(x, y *pick) int { return x.at.Compare(y.at) })
+	return out
+}
+
+// quit：让这个 app 退出（Windows 安装新版、卸载时要先停掉旧的，desktop_windows.go）
+func (a *app) quit(w http.ResponseWriter, r *http.Request) {
+	writeJSONResp(w, map[string]bool{"ok": true})
+	log.Print("收到退出请求")
+	go func() {
+		time.Sleep(200 * time.Millisecond)
+		closeLive()
+		os.Exit(0)
+	}()
 }
 
 // cancel：{"ch":"send:N"} 取消这次发送；{"ch":"recv"} 取消正在收的（所有好友的）

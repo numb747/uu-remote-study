@@ -27,6 +27,7 @@ import (
 	"log"
 	"os"
 	"path/filepath"
+	"runtime"
 	"sort"
 	"strings"
 	"sync"
@@ -695,8 +696,9 @@ func serveLink(o opts, l *link) error {
 }
 
 func recvFile(o opts, l *link, offer ctlMsg, cur *atomic.Pointer[inFile], enc *json.Encoder, dec *json.Decoder) (err error) {
-	name := filepath.Base(offer.Name) // 不信任对方给的路径
-	noteName("f", offer.Name)         // 不合法的名字也会进错误文字：先登记，诊断报告、上报里才能打码
+	// 不信任对方给的路径。Windows 上先换掉不能用的字符（winname.go）：斜杠、冒号变全角，「w:x」不会被当成盘符截掉
+	name := filepath.Base(localName(offer.Name))
+	noteName("f", offer.Name) // 不合法的名字也会进错误文字：先登记，诊断报告、上报里才能打码
 	if name == "." || name == ".." || name == "/" || strings.HasPrefix(name, ".p2pcp-") || len(offer.FID) != 32 || strings.Trim(offer.FID, "0123456789abcdef") != "" {
 		enc.Encode(ctlMsg{T: "bad", Err: "文件名或指纹不合法"})
 		return fmt.Errorf("对方发来的文件名或指纹不合法：%q %q", offer.Name, offer.FID)
@@ -812,7 +814,8 @@ func recvFile(o opts, l *link, offer ctlMsg, cur *atomic.Pointer[inFile], enc *j
 	}
 	out := uniquePath(o.out, name)
 	noteFile(out) // 诊断报告里打码用（diag.go）
-	if err := os.Rename(f.part, out); err != nil {
+	f.f.Close()   // Windows 上开着的文件改不了名
+	if err := renameRetry(f.part, out); err != nil {
 		return err
 	}
 	os.Remove(f.meta)
@@ -821,6 +824,17 @@ func recvFile(o opts, l *link, offer ctlMsg, cur *atomic.Pointer[inFile], enc *j
 	}
 	o.rep.done("recv", f.size, f.size-startHave, el, out)
 	return nil
+}
+
+// renameRetry：Windows 上文件刚关掉时杀毒软件、搜索索引可能还占着一会儿，改名失败就再试几次（最多约 1 秒）
+func renameRetry(from, to string) (err error) {
+	for i := range 5 {
+		if err = os.Rename(from, to); err == nil || runtime.GOOS != "windows" {
+			return err
+		}
+		time.Sleep(time.Duration(100*(i+1)) * time.Millisecond)
+	}
+	return err
 }
 
 // recvPiece 收一块。断在中间也把已经写下的部分记上，续传时只补剩下的

@@ -7,6 +7,7 @@
 /captures/*
 !/captures/.gitkeep
 apps/android/out/
+apps/win/out/
 
 # p2pcp 诊断上报的原始记录（从 99-server 拉下来分析）：有朋友的公网 IP，不进公开仓库
 /lab/real/reports/

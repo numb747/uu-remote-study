@@ -45,6 +45,7 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"runtime"
 	"runtime/debug"
 	"strings"
 	"sync/atomic"
@@ -61,19 +62,24 @@ const (
 	msgNom   = "/PN" // 提名：发送端告诉接收端"就用这条"（两端都有 IPv4 + IPv6 两个 socket 时才需要）
 )
 
-// serverConf：没给 -server 时依次看环境变量 P2PCP_SERVER、~/.config/p2pcp/server（apps/pc/install.sh 写的）。
+// serverConf：没给 -server 时依次看环境变量 P2PCP_SERVER、~/.config/p2pcp/server（apps/pc/install.sh 写的；
+// Windows 是 %AppData%\p2pcp\server）、打包时写进去的 defaultServer。
 // 可以写同一台服务器的几个端口，房间共享，每轮换一个；别用 7000 开头，它在某台电信 CGNAT 下有毒（docs/09 第 7 节）
 func serverConf() string {
 	if s := os.Getenv("P2PCP_SERVER"); s != "" {
 		return s
 	}
-	if home, err := os.UserHomeDir(); err == nil {
-		if b, err := os.ReadFile(filepath.Join(home, ".config/p2pcp/server")); err == nil {
+	if d, err := os.UserConfigDir(); err == nil { // Linux ~/.config，Windows %AppData%，macOS ~/Library/Application Support
+		if b, err := os.ReadFile(filepath.Join(d, "p2pcp", "server")); err == nil {
 			return strings.TrimSpace(string(b))
 		}
 	}
-	return ""
+	return defaultServer
 }
+
+// defaultServer：打包时写进去的会合服务器（apps/win/build.sh 用 -ldflags -X main.defaultServer=…），
+// 朋友的 Windows / macOS 版没有 install.sh 写的配置文件，邀请好友时用它
+var defaultServer string
 
 // 实际发出的打洞包补到 48 字节，别太像异常小包。（2026-10-17 排查电信 CGNAT 下双向全丢时试过，真正的原因是会合
 // 服务器用了 UDP 7000，见 docs/09 第 7 节；填充本身无害，保留）
@@ -127,12 +133,16 @@ type opts struct {
 }
 
 func main() {
+	if len(os.Args) < 2 && runtime.GOOS == "windows" {
+		os.Args = append(os.Args, "launch") // 双击 P2P直传.exe：装好、打开网页（desktop_windows.go）
+	}
 	if len(os.Args) < 2 {
 		usage()
 	}
 	role := os.Args[1]
 	switch role {
-	case "send", "recv", "daemon", "check", "expose", "forward", "serve", "id", "invite", "join", "contacts", "report", "app":
+	case "send", "recv", "daemon", "check", "expose", "forward", "serve", "id", "invite", "join", "contacts", "report", "app",
+		"sendto", "launch", "uninstall":
 	default:
 		usage()
 	}
@@ -173,12 +183,23 @@ func main() {
 	progress := fs.Bool("progress", false, "在 stdout 输出机器可读的进度行")
 	notify := fs.Bool("notify", false, "用 notify-send 弹桌面通知")
 	fs.Parse(os.Args[2:])
-	timeoutSet := false
+	timeoutSet, outSet, notifySet := false, false, false
 	fs.Visit(func(f *flag.Flag) {
 		o.roomSet = o.roomSet || f.Name == "room"
 		o.serverSet = o.serverSet || f.Name == "server"
 		timeoutSet = timeoutSet || f.Name == "timeout"
+		outSet = outSet || f.Name == "o"
+		notifySet = notifySet || f.Name == "notify"
 	})
+	if role == "app" || role == "launch" {
+		// 桌面版没人给参数（Windows 双击、开机自启、「发送到」拉起来的）：收到下载\P2P直传，Windows 上弹通知
+		if !outSet {
+			o.out = defaultOut()
+		}
+		if !notifySet && runtime.GOOS == "windows" {
+			*notify = true
+		}
+	}
 	if role == "join" && !timeoutSet {
 		// 邀请方在线时 1 秒内就配上；邀请码用过 / 过期后邀请方不再听那个房间，别让朋友干等 1 分钟
 		o.timeout = 20 * time.Second
@@ -188,14 +209,15 @@ func main() {
 		o.server = serverConf()
 	}
 	// 不碰网络的命令、会合地址另有来处的命令（join 听邀请码的，send -to 听好友记录的，serve 每个好友各有地址）不要求 -server
-	needServer := !(role == "id" || role == "contacts" || role == "join" || role == "serve" || role == "report" || role == "app" || o.friend != "")
+	needServer := !(role == "id" || role == "contacts" || role == "join" || role == "serve" || role == "report" || role == "app" ||
+		role == "sendto" || role == "launch" || role == "uninstall" || o.friend != "")
 	if o.server == "" && needServer {
 		log.Fatal("没有会合服务器：用 -server IP:7001 指定，或者写进 ~/.config/p2pcp/server（也认环境变量 P2PCP_SERVER）。" +
 			"在一台有公网 IP 的机器上跑 punch server -listen :7001 -relay :3478，放行 UDP 7001 和 3478")
 	}
 	o.rep = &reporter{machine: *progress, notify: *notify}
 	o.regEvery = 500 * time.Millisecond
-	if role != "id" && role != "contacts" && os.Getenv("P2PCP_NO_LOG") == "" {
+	if role != "id" && role != "contacts" && role != "sendto" && os.Getenv("P2PCP_NO_LOG") == "" {
 		setupLog(role) // 日志落盘（diag.go），诊断报告要用
 	}
 	setupCrash(o.rep)
@@ -249,6 +271,12 @@ func main() {
 		err = cmdReport(o, fs.Args())
 	case "app":
 		err = cmdApp(o, *noBrowser)
+	case "launch":
+		err = cmdLaunch(o)
+	case "uninstall":
+		err = cmdUninstall(o)
+	case "sendto":
+		err = cmdSendto(o, fs.Args())
 	case "recv":
 		err = recv(o)
 	case "check":
@@ -336,7 +364,7 @@ func exitGracefully() {
 		s := <-sig
 		closeLive()
 		signal.Reset()
-		syscall.Kill(os.Getpid(), s.(syscall.Signal))
+		reraise(s)
 	}()
 }
 
@@ -345,6 +373,7 @@ func usage() {
 	fmt.Println("       p2pcp id | invite | join <邀请码> | contacts | send -to 好友 文件... | serve   通讯录模式")
 	fmt.Println("       p2pcp check              本机这一侧的网络体检")
 	fmt.Println("       p2pcp app                桌面版：常驻接收 + 本机网页界面")
+	fmt.Println("       p2pcp sendto 文件...      交给正在跑的桌面版、在网页上选发给谁（右键「发送到」）")
 	fmt.Println("       p2pcp report             生成诊断报告（-upload on|off 开关诊断数据上报）")
 	fmt.Println("       p2pcp check -room 名字    两端各跑一次：双端体检（画像、预测、实际打洞、往返和丢包、中继）")
 	os.Exit(2)

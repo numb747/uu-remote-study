@@ -4,7 +4,6 @@ import (
 	"errors"
 	"fmt"
 	"log"
-	"os/exec"
 	"strings"
 	"sync"
 	"time"
@@ -102,23 +101,15 @@ func (r *reporter) fail(err error) {
 	r.mu.Unlock()
 }
 
-// desktop 弹或更新一条桌面通知；pct ≥ 0 时带进度条。进度通知最多一秒更新一次。
+// desktop 弹或更新一条桌面通知；pct ≥ 0 时带进度条（只有 Linux 弹进度，见 notify_*.go）。
 func (r *reporter) desktop(title, body string, pct int) {
 	if !r.notify {
 		return
 	}
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	args := []string{"-a", "P2P 直传", "-i", "network-transmit-receive", "-p"}
-	if r.nid != "" {
-		args = append(args, "-r", r.nid)
-	}
-	if pct >= 0 {
-		args = append(args, "-h", fmt.Sprintf("int:value:%d", pct), "-u", "low")
-	}
-	out, err := exec.Command("notify-send", append(args, title, body)...).Output()
-	if err == nil {
-		r.nid = strings.TrimSpace(string(out))
+	if id, ok := osNotify(title, body, pct, r.nid); ok {
+		r.nid = id
 	}
 }
 
