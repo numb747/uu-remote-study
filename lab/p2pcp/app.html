@@ -24,7 +24,11 @@
   .friend .name { flex:1; font-size:17px; }
   .friend.drop { background:#2f3549; outline:2px dashed var(--blue); }
   .state { font-size:16px; margin:6px 0 8px; }
-  .state.ok { color:var(--green); } .state.bad { color:var(--red); }
+  .state.ok { color:var(--green); } .state.bad { color:var(--red); } .state.off { color:var(--dim); }
+  .card .head { display:flex; align-items:center; justify-content:space-between; gap:12px; }
+  .card .head h2 { margin:0; }
+  button.cancel { padding:4px 14px; font-size:13px; border-radius:8px; background:transparent; color:var(--red); border:1px solid var(--red); font-weight:normal; display:none; }
+  button.cancel.on { display:inline-block; }
   .bar { height:8px; background:var(--line); border-radius:4px; overflow:hidden; }
   .bar > div { height:100%; width:0; background:var(--blue); transition: width .3s; }
   .detail { color:var(--dim); font-size:13px; margin-top:6px; white-space:pre-wrap; }
@@ -55,14 +59,14 @@
   </div>
 
   <div class="card" id="sendCard">
-    <h2>发送</h2>
+    <div class="head"><h2>发送</h2><button class="cancel" id="sendCancel">取消</button></div>
     <div class="state" id="sendState">选一个好友发文件</div>
     <div class="bar"><div id="sendBar"></div></div>
     <div class="detail" id="sendDetail"></div>
   </div>
 
   <div class="card" id="recvCard">
-    <h2>接收（后台常驻，存到 <span id="out"></span>/好友名）</h2>
+    <div class="head"><h2>接收（后台常驻，存到 <span id="out"></span>/好友名）</h2><button class="cancel" id="recvCancel">取消</button></div>
     <div class="state" id="recvState">—</div>
     <div class="bar"><div id="recvBar"></div></div>
     <div class="detail" id="recvDetail"></div>
@@ -108,6 +112,7 @@ const $ = id => document.getElementById(id);
 let state = null, pickFor = null, lastSeq = 0;
 const sendTo = {};   // 发送通道 → 好友名
 let recvJustDone = false;
+let curSend = null;  // 正在进行的发送：{ xhr }（文件还在交给 P2P 直传）或 { ch }（在发了）
 
 function toast(s) { const t = $('toast'); t.textContent = s; t.style.display = 'block'; clearTimeout(t._h); t._h = setTimeout(() => t.style.display = 'none', 3500); }
 async function post(url, body) {
@@ -175,16 +180,32 @@ function sendFiles(friend, files) {
   const what = files.length === 1 ? files[0].name : `${files.length} 个文件`;
   setPanel('send', `准备 ${what}（发给 ${friend}）`, '', 0, '');
   const x = new XMLHttpRequest();
+  curSend = { xhr: x }; showCancel('send', true);
   x.open('POST', '/api/send');
   x.upload.onprogress = e => { if (e.lengthComputable) setPanel('send', `准备 ${what}（发给 ${friend}）`, '', e.loaded / e.total, `交给 P2P 直传：${(e.loaded / 1e6).toFixed(1)} / ${(e.total / 1e6).toFixed(1)} MB`); };
   x.onload = () => {
     const j = JSON.parse(x.responseText || '{}');
-    if (x.status !== 200) setPanel('send', '失败：' + (j.human || j.error), 'bad', 0, j.action || '');
-    else sendTo[j.ch] = j.friend;
+    if (x.status !== 200) { setPanel('send', '失败：' + (j.human || j.error), 'bad', 0, j.action || ''); curSend = null; showCancel('send', false); }
+    else { sendTo[j.ch] = j.friend; curSend = { ch: j.ch }; }
   };
-  x.onerror = () => setPanel('send', '失败：交给 P2P 直传时出错（它还在运行吗？）', 'bad', 0, '');
+  x.onerror = () => { setPanel('send', '失败：交给 P2P 直传时出错（它还在运行吗？）', 'bad', 0, ''); curSend = null; showCancel('send', false); };
+  x.onabort = () => { setPanel('send', '已取消', 'off', 0, ''); curSend = null; showCancel('send', false); };
   x.send(fd);
 }
+
+function showCancel(which, on) { $(which + 'Cancel').classList.toggle('on', on); }
+$('sendCancel').onclick = async () => {
+  const c = curSend;
+  if (!c) return showCancel('send', false);
+  if (c.xhr) return c.xhr.abort();
+  $('sendCancel').disabled = true;
+  try { await post('/api/cancel', { ch: c.ch }); } catch (e) { toast(errText(e)); }
+  $('sendCancel').disabled = false;
+};
+$('recvCancel').onclick = async () => {
+  if (!confirm('取消正在接收的文件？收了一半的部分会删掉，对方要重新发。')) return;
+  try { await post('/api/cancel', { ch: 'recv' }); } catch (e) { toast(errText(e)); }
+};
 
 function setPanel(which, text, cls, frac, detail) {
   if (text !== null) { $(which + 'State').textContent = text; $(which + 'State').className = 'state ' + (cls || ''); }
@@ -209,17 +230,28 @@ function handle(e, live) {
   const ch = e.ch, which = ch.startsWith('send') ? 'send' : ch === 'pair' ? 'join' : 'recv';
   const line = e.line, f = line.split(' ');
   // 日志卡片：进度以外的机器行（完整日志在缓存目录，诊断报告里有）
-  if (['@STATE', '@ERROR', '@CRASH'].includes(f[0])) {
+  if (['@STATE', '@ERROR', '@CRASH', '@CANCELED'].includes(f[0])) {
     const l = $('log');
-    l.textContent += `${new Date(e.at).toTimeString().slice(0, 8)} [${ch}] ${line.replace(/^@\w+ /, '')}\n`;
+    l.textContent += `${new Date(e.at).toTimeString().slice(0, 8)} [${ch}] ${line.replace(/^@CANCELED (me|peer) /, '').replace(/^@\w+ /, '')}\n`;
     const lines = l.textContent.split('\n'); if (lines.length > 80) l.textContent = lines.slice(-80).join('\n');
     l.scrollTop = l.scrollHeight;
   }
   switch (f[0]) {
-    case '@TO': sendTo[ch] = line.slice(4); break;
+    case '@TO': sendTo[ch] = line.slice(4); curSend = { ch }; showCancel('send', true); break; // 刷新页面后补回来的也算
+    case '@END': if (curSend && curSend.ch === ch) { curSend = null; showCancel('send', false); } break;
+    case '@CANCELED': {
+      const peer = f[1] === 'peer';
+      const t = peer ? '对方取消了' : '已取消';
+      setPanel(which, t, 'off', null, peer ? '' : (which === 'recv' ? '收了一半的部分已删掉' : ''));
+      if (which === 'recv') { showCancel('recv', false); recvJustDone = true; }
+      // 接收的文字里带着好友名（「收「小B」的文件：对方取消了」）
+      addRecord(e.at, `<span class="dim">${which === 'send' ? '发给 ' + esc(sendTo[ch] || '') + '：' + t : esc(f.slice(2).join(' '))}</span>`);
+      break;
+    }
     case '@STATE': {
       const s = line.slice(7);
       if (which === 'join') { $('joinState').textContent = s; break; }
+      if (which === 'recv' && s.startsWith('等待好友发送')) showCancel('recv', false);
       if (which === 'recv' && recvJustDone && s.startsWith('等待好友发送')) break;
       if (which === 'recv') recvJustDone = false;
       setPanel(which, s, '', null, null);
@@ -228,6 +260,7 @@ function handle(e, live) {
     case '@PROGRESS': {
       const done = +f[2], total = +f[3];
       setPanel(which, null, null, total ? done / total : 0, `${(done / 1e6).toFixed(1)} / ${(total / 1e6).toFixed(1)} MB · ${f[4]} Mbps`);
+      if (which === 'recv' && live) showCancel('recv', true);
       break;
     }
     case '@DONE': {
@@ -240,6 +273,7 @@ function handle(e, live) {
         const from = base(path.slice(0, path.length - name.length - 1));
         setPanel('recv', `已收到 ${name}`, 'ok', 1, `${d}\n已存到 ${path}`);
         recvJustDone = true;
+        showCancel('recv', false);
         addRecord(e.at, `收到 ${esc(from)} 发来的 <b>${esc(name)}</b> <span class="dim">${d}</span>`);
       }
       break;
@@ -254,6 +288,7 @@ function handle(e, live) {
       const err = line.slice(7);
       if (which === 'join') { $('joinState').textContent = r ? `${r.human}：${r.action}` : err; break; }
       setPanel(which, '失败：' + (r ? r.human : err), 'bad', null, r ? `${r.action}\n（${err}，原因码 ${r.code}）` : '');
+      if (which === 'recv') showCancel('recv', false);
       addRecord(e.at, `<span style="color:var(--red)">${which === 'send' ? '发给 ' + esc(sendTo[ch] || '') + ' 失败' : '接收失败'}</span>：${esc(r ? r.human : err)}`);
       break;
     }

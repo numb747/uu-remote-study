@@ -22,18 +22,23 @@ const (
 	rsnAuth    = "auth_failed"     // 对方不是这个好友
 	rsnLocal   = "local_error"     // 本机读写文件出错
 	rsnUnknown = "unknown"
+	// 手动取消（cancel.go）：不是失败，记下来是为了统计里分得清
+	rsnCanceled     = "canceled"      // 本机取消
+	rsnPeerCanceled = "peer_canceled" // 对方取消
 )
 
 // reasonText：码 → 一句人话 + 一个能做的动作
 var reasonText = map[string][2]string{
-	rsnRdv:     {"连不上会合服务器", "检查本机网络；公司 / 学校网络可能封了 UDP，换手机热点试试"},
-	rsnOffline: {"对方没在线", "请对方打开 P2P 直传；安卓手机熄屏会被系统冻结，要在系统设置里给它打开「允许后台高耗电」"},
-	rsnPunch:   {"两边都在线，但网络之间打不通", "两边的网络都太严（对称型 NAT），换个网络（比如手机热点）再试"},
-	rsnRelay:   {"打不通，中继服务器也连不上", "过一会儿再试；一直不行就生成诊断报告发给我"},
-	rsnLost:    {"连上之后连接断了", "网络不稳定或者换了网络；重新发送会从断的地方接着传"},
-	rsnAuth:    {"对方没通过身份核对", "对方可能不是这个好友，或者通讯录记录坏了：删掉好友重新加一次"},
-	rsnLocal:   {"本机读写文件出错", "检查文件还在不在、有没有权限、磁盘满没满"},
-	rsnUnknown: {"出错了", "生成诊断报告发给我"},
+	rsnRdv:          {"连不上会合服务器", "检查本机网络；公司 / 学校网络可能封了 UDP，换手机热点试试"},
+	rsnOffline:      {"对方没在线", "请对方打开 P2P 直传；安卓手机熄屏会被系统冻结，要在系统设置里给它打开「允许后台高耗电」"},
+	rsnPunch:        {"两边都在线，但网络之间打不通", "两边的网络都太严（对称型 NAT），换个网络（比如手机热点）再试"},
+	rsnRelay:        {"打不通，中继服务器也连不上", "过一会儿再试；一直不行就生成诊断报告发给我"},
+	rsnLost:         {"连上之后连接断了", "网络不稳定或者换了网络；重新发送会从断的地方接着传"},
+	rsnAuth:         {"对方没通过身份核对", "对方可能不是这个好友，或者通讯录记录坏了：删掉好友重新加一次"},
+	rsnLocal:        {"本机读写文件出错", "检查文件还在不在、有没有权限、磁盘满没满"},
+	rsnUnknown:      {"出错了", "生成诊断报告发给我"},
+	rsnCanceled:     {"已取消", "要发的话重新发一次"},
+	rsnPeerCanceled: {"对方取消了", "要发的话重新发一次"},
 }
 
 // reasonError 给错误标上码（握手失败这类没有哨兵的地方用）
@@ -56,6 +61,16 @@ func withReason(code string, err error) error {
 func reasonOf(err error) string {
 	if err == nil || errors.Is(err, errStopped) {
 		return ""
+	}
+	var ce canceledErr
+	if errors.As(err, &ce) {
+		if ce.peer {
+			return rsnPeerCanceled
+		}
+		return rsnCanceled
+	}
+	if peerCanceled(err) {
+		return rsnPeerCanceled
 	}
 	var re reasonError
 	if errors.As(err, &re) {

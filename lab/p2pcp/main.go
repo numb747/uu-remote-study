@@ -121,6 +121,9 @@ type opts struct {
 	serverSet bool          // 命令行给了 -server（send -to 时就不用好友记录里的会合地址）
 	regIdle   time.Duration // 常驻接收空等时的注册间隔（-reg；手机后台拉长省电）
 	rep       *reporter
+	// 手动取消（cancel.go）
+	x   *xfer  // 这次传输，取消时由它叫停；send 没给就自己建一个
+	sid string // 发送号：一次 send 一个，重连续传时不变
 }
 
 func main() {
@@ -197,6 +200,9 @@ func main() {
 	}
 	setupCrash(o.rep)
 	exitGracefully()
+	if *progress && (role == "send" || role == "serve" || role == "recv" || role == "daemon") {
+		readCommands(role) // App 往 stdin 写 cancel（cancel.go）
+	}
 	switch *upload {
 	case "":
 	case "on", "off":

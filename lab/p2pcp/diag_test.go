@@ -1,6 +1,8 @@
 package main
 
 import (
+	"github.com/apernet/quic-go"
+
 	"crypto/sha256"
 	"encoding/hex"
 	"errors"
@@ -22,6 +24,10 @@ func TestReasonOf(t *testing.T) {
 	}{
 		{nil, ""},
 		{errStopped, ""},
+		{canceledErr{}, rsnCanceled},
+		{fmt.Errorf("收「小B」的文件：%w", canceledErr{peer: true}), rsnPeerCanceled},
+		{interrupted{fmt.Errorf("等对方回应: %w", &quic.ApplicationError{Remote: true, ErrorCode: codeCanceled})}, rsnPeerCanceled},
+		{interrupted{&quic.ApplicationError{Remote: true, ErrorCode: 0}}, rsnLost}, // 对方退出（Ctrl-C）不算取消
 		{fmt.Errorf("%w 1.2.3.4:7001：本机断网：%w", errNoRendezvous, errBadPort), rsnRdv},
 		{fmt.Errorf("%w：2 秒没收到会合服务器的回执", errBadPort), rsnRdv},
 		{fmt.Errorf("%w：5s 没收到回执", errLost), rsnRdv},

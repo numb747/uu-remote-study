@@ -31,6 +31,7 @@ import java.io.OutputStream;
 public class P2PService extends Service {
     static volatile P2p.Lines listener; // 界面开着时非空
     static volatile String lastState = "启动中…";
+    static volatile P2PService instance;
 
     volatile boolean alive = true;
     volatile Process serve;
@@ -40,6 +41,7 @@ public class P2PService extends Service {
     @Override
     public void onCreate() {
         super.onCreate();
+        instance = this;
         nm = getSystemService(NotificationManager.class);
         nm.createNotificationChannel(new NotificationChannel("serve", "后台接收", NotificationManager.IMPORTANCE_LOW));
         nm.createNotificationChannel(new NotificationChannel("got", "收到文件 / 新好友", NotificationManager.IMPORTANCE_DEFAULT));
@@ -56,10 +58,17 @@ public class P2PService extends Service {
     @Override
     public void onDestroy() {
         alive = false;
+        instance = null;
         if (netWatch != null) getSystemService(ConnectivityManager.class).unregisterNetworkCallback(netWatch);
         Process p = serve;
         if (p != null) p.destroy();
         super.onDestroy();
+    }
+
+    /** 界面上点了接收的「取消」：叫停正在收的（所有好友的；界面上同时只显示一个）。后台线程里调 */
+    static void cancelRecv() {
+        P2PService s = instance;
+        if (s != null) P2p.command(s.serve, "cancel recv");
     }
 
     @Override
@@ -98,6 +107,9 @@ public class P2PService extends Service {
             }
         } else if (l.startsWith("@PAIRED ")) {
             notifyGot("新好友", l.substring(8));
+        } else if (l.startsWith("@CANCELED ")) {
+            lastState = l.startsWith("@CANCELED peer") ? "对方取消了" : "已取消接收";
+            nm.notify(1, ongoing(lastState));
         }
         forward(l);
     }

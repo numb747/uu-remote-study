@@ -18,6 +18,8 @@
 #   diag     造出各类失败，看原因码（@REASON）、结果记录和诊断上报：发不存在的文件 → local_error，对方不在 → peer_offline，
 #            传到一半发送端退出 → 接收端 conn_lost，封掉两个 NAT 之间的 UDP → punch_blocked（-relay off）/ 再封中继 → relay_failed，
 #            封会合端口 → rdv_unreachable（上报进本机队列，放开后下一次连接补发）；最后汇总服务器收到的上报（report-stats.py）
+#   cancel   手动取消（stdin 写 cancel，App 就是这么叫的）：发送端取消、接收端取消，两边都报 @CANCELED、发送端不重连、
+#            半成品删掉；接收端取消时把 CONNECTION_CLOSE 丢掉，发送端当成中断重连过来，接收端认出发送号、回 cancel
 #   desync   人为让两端的打洞轮次错开（B 晚 1.5 秒拿到 /P，前 4.5 秒 A→B 直连全丢）：B 应从重推的 /P 学到 A 的新地址，
 #            或者看到 A 的 relay 标志中途跟进中继，而不是各打满各的一轮（放在 preflight 之后跑，要用它留下的画像缓存）
 #
@@ -28,7 +30,7 @@ HERE=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 W=$(mktemp -d /tmp/p2pcp-test.XXXX)
 SRV=192.0.2.1:7001,192.0.2.1:7000
 ROOM=lab-$RANDOM-$RANDOM
-TESTS=${TESTS:-preflight desync checkpair send resume reconn tunnel upgrade xferup xferblock pair diag}
+TESTS=${TESTS:-preflight desync checkpair send resume reconn tunnel upgrade xferup xferblock pair diag cancel}
 A() { ip netns exec peerA "$@"; }
 Bn() { ip netns exec peerB "$@"; }
 # 后台跑：$! 就是 p2pcp 进程本身（ip netns exec 会 exec 过去），kill 得到
@@ -534,6 +536,83 @@ t_diag() {
 		ok "诊断报告 $(($(wc -c <"$rp") / 1024))KB，文件名已打码" || bad "诊断报告不对：$rp"
 	python3 -I "$HERE/../real/report-stats.py" "$R" >"$W/diag-stats.md" 2>&1 && grep -q '## 原因码' "$W/diag-stats.md" &&
 		ok "统计脚本出表：$(grep -c '^| [a-z_]* |' "$W/diag-stats.md") 种原因码" || bad "统计脚本出错：$(tail -n 3 "$W/diag-stats.md")"
+}
+
+# 等某个日志里出现某行（最多 $3 秒）
+wait_line() { local i; for i in $(seq $(($3 * 2))); do grep -q "$1" "$2" && return 0; sleep 0.5; done; return 1; }
+# 半成品和成品都不该有
+no_leftover() { # <目录> <文件名>
+	if ls "$1"/.p2pcp-* >/dev/null 2>&1 || [[ -e $1/$2 ]]; then bad "接收目录里有残留：$(ls -A "$1" | tr '\n' ' ')"; else ok "接收目录干净（半成品删了）"; fi
+}
+
+t_cancel() {
+	echo "== cancel：手动取消（natA=$NAT_A natB=$NAT_B）"
+	local P="$B/p2pcp" hist=$XDG_CACHE_HOME/p2pcp/history.jsonl r s t0 fa fb
+	head -c 40000000 /dev/urandom >"$W/x.bin"
+	mkdir -p "$W/xout1" "$W/xout2"
+	ip netns exec natA tc qdisc add dev wan root tbf rate 20mbit burst 64kb latency 50ms # 40MB 要传十几秒，来得及取消
+	mkfifo "$W/a.in" "$W/b.in"
+	exec {fa}<>"$W/a.in" {fb}<>"$W/b.in" # 读写打开：不阻塞，进程那头读得到我们写的行
+
+	# 1. 发送端取消
+	bgB "$P" daemon -server "$SRV" -room "$ROOM.x1" -o "$W/xout1" -progress >"$W/cancel1-recv.log" 2>&1
+	r=$!
+	# 不用 bgA：函数里 & 出去的命令 stdin 会被换成 /dev/null
+	ip netns exec peerA "$P" send -server "$SRV" -room "$ROOM.x1" -conns 2 -progress "$W/x.bin" <"$W/a.in" >"$W/cancel1-send.log" 2>&1 &
+	s=$!
+	wait_line '^@PROGRESS recv' "$W/cancel1-recv.log" 40 || bad "40 秒还没开始收"
+	sleep 1
+	t0=$SECONDS
+	echo cancel >&$fa
+	wait $s
+	(( SECONDS - t0 <= 3 )) && ok "发送端取消后 $((SECONDS - t0)) 秒退出" || bad "发送端取消后 $((SECONDS - t0)) 秒才退出"
+	grep -q '^@CANCELED me ' "$W/cancel1-send.log" && ok "发送端报 @CANCELED me" || bad "发送端没报取消：$(grep '^@' "$W/cancel1-send.log" | tail -n 3 | tr '\n' '|')"
+	grep -q '重连续传' "$W/cancel1-send.log" && bad "发送端取消后还在重连" || ok "发送端没有重连"
+	wait_line '^@CANCELED peer ' "$W/cancel1-recv.log" 5 && ok "接收端报 @CANCELED peer「$(grep -o '^@CANCELED peer .*' "$W/cancel1-recv.log" | cut -d' ' -f3-)」" ||
+		bad "接收端没认出对方取消：$(grep '^@' "$W/cancel1-recv.log" | tail -n 3 | tr '\n' '|')"
+	sleep 0.5
+	no_leftover "$W/xout1" x.bin
+	grep -q '"reason":"canceled"' "$hist" && grep -q '"reason":"peer_canceled"' "$hist" && ok "history 记成 canceled / peer_canceled" || bad "history 里没有 canceled / peer_canceled"
+	kill $r 2>/dev/null; wait $r 2>/dev/null
+
+	# 2. 接收端取消
+	ip netns exec peerB "$P" daemon -server "$SRV" -room "$ROOM.x2" -o "$W/xout2" -progress <"$W/b.in" >"$W/cancel2-recv.log" 2>&1 &
+	r=$!
+	bgA "$P" send -server "$SRV" -room "$ROOM.x2" -conns 2 -progress "$W/x.bin" >"$W/cancel2-send.log" 2>&1
+	s=$!
+	wait_line '^@PROGRESS recv' "$W/cancel2-recv.log" 40 || bad "40 秒还没开始收"
+	sleep 1
+	t0=$SECONDS
+	echo cancel recv >&$fb
+	wait $s
+	(( SECONDS - t0 <= 3 )) && ok "接收端取消后发送端 $((SECONDS - t0)) 秒退出" || bad "接收端取消后发送端 $((SECONDS - t0)) 秒才退出"
+	grep -q '^@CANCELED peer ' "$W/cancel2-send.log" && ok "发送端报 @CANCELED peer" || bad "发送端没认出对方取消：$(grep '^@' "$W/cancel2-send.log" | tail -n 3 | tr '\n' '|')"
+	grep -q '重连续传' "$W/cancel2-send.log" && bad "发送端还在重连" || ok "发送端没有重连"
+	grep -q '^@CANCELED me ' "$W/cancel2-recv.log" && ok "接收端报 @CANCELED me" || bad "接收端没报取消"
+	sleep 0.5
+	no_leftover "$W/xout2" x.bin
+	kill -0 $r 2>/dev/null && ok "常驻接收还活着" || bad "常驻接收退出了"
+
+	# 3. 接收端取消，但 CONNECTION_CLOSE 丢了：发送端空闲超时后当成中断重连，接收端按发送号回 cancel（同一个 daemon）
+	local n0
+	n0=$(grep -c '^@PROGRESS recv' "$W/cancel2-recv.log") # 上一轮的进度行不算
+	bgA "$P" send -server "$SRV" -room "$ROOM.x2" -conns 1 -progress "$W/x.bin" >"$W/cancel3-send.log" 2>&1
+	s=$!
+	for _ in $(seq 80); do (( $(grep -c '^@PROGRESS recv' "$W/cancel2-recv.log") > n0 + 3 )) && break; sleep 0.5; done
+	diag_block p2p relay
+	echo cancel recv >&$fb
+	sleep 2
+	diag_unblock
+	t0=$SECONDS
+	wait $s
+	grep -q '重连续传' "$W/cancel3-send.log" && ok "取消信号丢了，发送端当成中断去重连（$((SECONDS - t0)) 秒后退出）" || bad "发送端没走重连这条路（测试没造出丢包？）"
+	grep -q '^@CANCELED peer ' "$W/cancel3-send.log" && ok "重连后接收端回了 cancel，发送端报 @CANCELED peer" ||
+		bad "发送端最后不是取消：$(grep '^@' "$W/cancel3-send.log" | tail -n 3 | tr '\n' '|')"
+	no_leftover "$W/xout2" x.bin
+	kill $r 2>/dev/null; wait $r 2>/dev/null
+
+	exec {fa}>&- {fb}>&-
+	ip netns exec natA tc qdisc del dev wan root
 }
 
 for t in $TESTS; do "t_$t"; done

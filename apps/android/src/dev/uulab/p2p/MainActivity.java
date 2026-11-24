@@ -64,18 +64,35 @@ public class MainActivity extends Activity {
     LinearLayout friendsBox;
     final List<String> friends = new ArrayList<>();
     String pendingFriend; // 选文件之前选好的好友
+    volatile Process sendProc;     // 正在跑的 p2pcp send（取消时往它的 stdin 写 cancel）
+    volatile boolean sendAborted;  // 还在复制到缓存时就点了取消
     AlertDialog inviteDlg;
 
     /** 一块显示区：标题、状态、进度条、详情。 */
     class Panel {
-        TextView state, detail;
+        TextView state, detail, cancel;
         ProgressBar bar;
+        final boolean recv;
         boolean justDone; // 刚显示完成：serve 紧接着报的「等待好友发送」不要盖掉它
         String[] reason;  // 紧跟着 @ERROR 的那条 @REASON：{原因码, 人话, 动作}
 
-        Panel(LinearLayout parent, String title) {
+        Panel(LinearLayout parent, String title, boolean recv) {
+            this.recv = recv;
             LinearLayout card = card(parent);
-            card.addView(text(title, 13, DIM, true));
+            LinearLayout head = new LinearLayout(MainActivity.this);
+            head.setGravity(Gravity.CENTER_VERTICAL);
+            head.addView(text(title, 13, DIM, true), new LinearLayout.LayoutParams(0, -2, 1));
+            // 取消：传输进行中才显示（手动取消，lab/p2pcp/cancel.go）
+            cancel = text("取消", 14, RED, false);
+            cancel.setPadding(dp(14), dp(4), dp(14), dp(4));
+            GradientDrawable cb = new GradientDrawable();
+            cb.setStroke(dp(1), RED);
+            cb.setCornerRadius(dp(8));
+            cancel.setBackground(cb);
+            cancel.setVisibility(android.view.View.GONE);
+            cancel.setOnClickListener(v -> onCancel(this));
+            head.addView(cancel);
+            card.addView(head);
             state = text("—", 16, FG, false);
             state.setPadding(0, dp(6), 0, dp(8));
             card.addView(state);
@@ -88,16 +105,22 @@ public class MainActivity extends Activity {
             card.addView(detail);
         }
 
+        void showCancel(boolean on) {
+            cancel.setVisibility(on ? android.view.View.VISIBLE : android.view.View.GONE);
+        }
+
         void handle(String line) {
             String[] f = line.split(" ", 6);
             switch (f[0]) {
                 case "@STATE":
+                    if (recv && line.startsWith("@STATE 等待好友发送")) showCancel(false);
                     if (justDone && line.startsWith("@STATE 等待好友发送")) return;
                     justDone = false;
                     state.setText(line.substring(7));
                     state.setTextColor(FG);
                     break;
                 case "@PROGRESS": { // @PROGRESS dir done total mbps name
+                    if (recv) showCancel(true);
                     long done = Long.parseLong(f[2]), total = Long.parseLong(f[3]);
                     bar.setProgress(total > 0 ? (int) (done * 1000 / total) : 0);
                     detail.setText(String.format("%.1f / %.1f MB　·　%s Mbps", done / 1e6, total / 1e6, f[4]));
@@ -112,6 +135,17 @@ public class MainActivity extends Activity {
                     if (tail.length > 1) d += "\n已存到 " + tail[1];
                     detail.setText(d);
                     justDone = true;
+                    if (recv) showCancel(false);
+                    break;
+                }
+                case "@CANCELED": { // @CANCELED me|peer 文字
+                    boolean peer = line.startsWith("@CANCELED peer");
+                    state.setText(peer ? "对方取消了" : "已取消");
+                    state.setTextColor(DIM);
+                    detail.setOnClickListener(null);
+                    detail.setText(recv && !peer ? "收了一半的部分已删掉" : peer ? "要的话请对方重新发" : "");
+                    justDone = true; // 别被紧接着的「等待好友发送」盖掉
+                    showCancel(false);
                     break;
                 }
                 case "@REASON": { // @REASON <码> <人话>。<动作>
@@ -123,6 +157,7 @@ public class MainActivity extends Activity {
                 }
                 case "@ERROR": {
                     String err = line.length() > 7 ? line.substring(7) : "";
+                    if (recv) showCancel(false);
                     state.setTextColor(RED);
                     detail.setOnClickListener(null);
                     if (reason == null) { // 旧版 p2pcp，或者 App 自己报的错
@@ -142,6 +177,26 @@ public class MainActivity extends Activity {
                 }
             }
         }
+    }
+
+    void onCancel(Panel p) {
+        if (!p.recv) {
+            sendAborted = true; // 还在复制的话，复制循环看到它就停
+            p.state.setText("正在取消…");
+            p.state.setTextColor(DIM);
+            Process sp = sendProc;
+            bg(() -> P2p.command(sp, "cancel"));
+            return;
+        }
+        new AlertDialog.Builder(this)
+                .setTitle("取消接收？")
+                .setMessage("收了一半的部分会删掉，对方要重新发。")
+                .setPositiveButton("取消接收", (d, w) -> {
+                    p.state.setText("正在取消…");
+                    bg(P2PService::cancelRecv);
+                })
+                .setNegativeButton("继续收", null)
+                .show();
     }
 
     @Override
@@ -176,10 +231,10 @@ public class MainActivity extends Activity {
         friendsBox.setOrientation(LinearLayout.VERTICAL);
         fc.addView(friendsBox);
 
-        sendPanel = new Panel(root, "发送");
+        sendPanel = new Panel(root, "发送", false);
         sendPanel.state.setText("选一个好友，或在相册里「分享 → P2P 直传」");
         sendPanel.state.setTextSize(14);
-        recvPanel = new Panel(root, "接收（后台常驻，存到「下载/P2P直传/好友名」）");
+        recvPanel = new Panel(root, "接收（后台常驻，存到「下载/P2P直传/好友名」）", true);
         recvPanel.state.setText(P2PService.lastState);
         // 国产安卓熄屏后会冻结后台 App（vivo 实测：前台服务、电池白名单都挡不住），要用户在系统设置里放行
         TextView bgTip = text("熄屏后收不到？点这里，在「电池」里打开「允许后台高耗电」（不同手机叫法不同：后台运行、自启动、不限制）", 13, BLUE, false);
@@ -580,6 +635,8 @@ public class MainActivity extends Activity {
     }
 
     void sendUris(List<Uri> uris, String friend) {
+        sendAborted = false;
+        sendPanel.showCancel(true);
         bg(() -> {
             File outbox = new File(getCacheDir(), "outbox");
             outbox.mkdirs();
@@ -588,6 +645,7 @@ public class MainActivity extends Activity {
             List<String> args = new ArrayList<>(List.of("send", "-to", friend));
             List<File> tmps = new ArrayList<>();
             for (Uri u : uris) {
+                if (sendAborted) break;
                 String name = displayName(u);
                 post(() -> {
                     sendPanel.state.setText("准备 " + name + "（发给 " + friend + "）");
@@ -599,16 +657,29 @@ public class MainActivity extends Activity {
                 try (InputStream is = getContentResolver().openInputStream(u); OutputStream os = new FileOutputStream(tmp)) {
                     byte[] buf = new byte[1 << 20];
                     int n;
-                    while ((n = is.read(buf)) > 0) os.write(buf, 0, n);
+                    while (!sendAborted && (n = is.read(buf)) > 0) os.write(buf, 0, n);
                 } catch (Exception e) {
                     post(() -> sendPanel.handle("@ERROR 读取文件失败：" + e.getMessage()));
                     continue;
                 }
+                if (sendAborted) {
+                    tmp.delete();
+                    break;
+                }
                 tmps.add(tmp);
                 args.add(tmp.getAbsolutePath());
             }
-            if (!tmps.isEmpty()) P2p.run(this, l -> post(() -> sendPanel.handle(l)), this::log, args.toArray(new String[0]));
+            if (sendAborted) {
+                post(() -> sendPanel.handle("@CANCELED me 已取消"));
+            } else if (!tmps.isEmpty()) {
+                P2p.run(this, l -> post(() -> sendPanel.handle(l)), this::log, p -> {
+                    sendProc = p;
+                    if (sendAborted) P2p.command(p, "cancel"); // 进程刚起来时点的取消
+                }, args.toArray(new String[0]));
+                sendProc = null;
+            }
             for (File f : tmps) f.delete();
+            post(() -> sendPanel.showCancel(false));
         });
     }
 

@@ -46,6 +46,7 @@ type ctlMsg struct {
 	Ranges [][2]uint64 `json:"ranges,omitempty"` // [off, len]
 	SHA256 string      `json:"sha256,omitempty"`
 	Err    string      `json:"err,omitempty"`
+	SID    string      `json:"sid,omitempty"` // offer 带：发送号（cancel.go）；接收端回 {"t":"cancel"} 表示这次发送已被它取消
 }
 
 var errNotRegular = errors.New("不是普通文件")
@@ -108,14 +109,32 @@ func send(o opts, paths []string) error {
 			return fmt.Errorf("%s %w", p, errNotRegular)
 		}
 	}
+	if o.x == nil {
+		o.x = newXfer("send", "send", o.friend)
+		defer o.x.end()
+	}
+	o.sid = randHex(8)
+	o.quit = o.x.done // 取消时还在会合 / 打洞的，马上不等了
 	files := append([]string(nil), paths...)
 	backoff, fails := 2*time.Second, 0
 	var next *link // 中继会话期间打通的直连：下一个会话直接用它
 	for {
 		progressed, up, err := sendSession(o, &files, next)
 		next = nil
+		if o.x.canceled() { // 本机取消：不管这一轮是怎么结束的
+			if up != nil {
+				up.closeWith(codeCanceled, "canceled")
+			}
+			return canceledErr{}
+		}
 		if err == nil {
 			return nil
+		}
+		if isCanceled(err) || peerCanceled(err) {
+			if up != nil {
+				up.close()
+			}
+			return canceledErr{peer: true}
 		}
 		if up != nil {
 			next, backoff, fails = up, 2*time.Second, 0
@@ -129,7 +148,11 @@ func send(o opts, paths []string) error {
 			return err
 		}
 		o.rep.state(fmt.Sprintf("连接断了（%v），%v 后重连续传", err, backoff))
-		time.Sleep(backoff)
+		select {
+		case <-time.After(backoff):
+		case <-o.x.done:
+			return canceledErr{}
+		}
 		backoff = min(2*backoff, 30*time.Second)
 	}
 }
@@ -158,6 +181,7 @@ func sendSession(o opts, files *[]string, l *link) (progressed bool, up *link, e
 		}
 	}
 	defer l.close()
+	defer o.x.watch(l)()
 	u := startUpgrade(o, l)
 	defer func() {
 		// defer 后进先出，在 close 之前跑：体检的结论在传输结束时补齐（preflight.go）
@@ -165,6 +189,9 @@ func sendSession(o opts, files *[]string, l *link) (progressed bool, up *link, e
 		u.annotate(&out)
 		if err != nil && up == nil { // 切到了直连（up）不算出错
 			out.err, out.reason = err.Error(), reasonOf(err)
+			if o.x.canceled() { // 本机取消：流上看到的是自己关连接的错，别记成断线
+				out.reason = rsnCanceled
+			}
 			l.pre.tracef("会话出错：%v", err)
 		}
 		l.pre.settle(out)
@@ -235,7 +262,7 @@ func sendFile(o opts, path string, conns []*quic.Conn, enc *json.Encoder, dec *j
 	if err != nil {
 		return false, err
 	}
-	if err := enc.Encode(ctlMsg{T: "offer", Name: fi.Name(), Size: size, FID: fid}); err != nil {
+	if err := enc.Encode(ctlMsg{T: "offer", Name: fi.Name(), Size: size, FID: fid, SID: o.sid}); err != nil {
 		return false, interrupted{err}
 	}
 	var have ctlMsg
@@ -244,6 +271,9 @@ func sendFile(o opts, path string, conns []*quic.Conn, enc *json.Encoder, dec *j
 	}
 	if have.T == "bad" {
 		return false, fmt.Errorf("对方拒收 %s：%s", fi.Name(), have.Err)
+	}
+	if have.T == "cancel" { // 对方已经取消了这次发送（它的 CONNECTION_CLOSE 我们没收到，cancel.go）
+		return false, canceledErr{peer: true}
 	}
 	missing := complement(have.Ranges, size)
 	var haveBytes uint64 = size
@@ -256,8 +286,10 @@ func sendFile(o opts, path string, conns []*quic.Conn, enc *json.Encoder, dec *j
 		o.rep.state(fmt.Sprintf("发送 %s（%.1fMB，%d 条连接，拥塞控制 %s）", fi.Name(), float64(size)/1e6, len(conns), o.cc))
 	}
 
-	// 边发边算整个文件的 sha256：另开一个文件句柄顺序读，和发送共用页缓存
+	// 边发边算整个文件的 sha256：另开一个文件句柄顺序读，和发送共用页缓存。发送中途出错（取消、断线）就不算了，
+	// 否则 2.5GB 的文件取消后还要在后台读完一遍
 	sum := make(chan string, 1)
+	abort := make(chan struct{})
 	go func() {
 		g, err := os.Open(path)
 		if err != nil {
@@ -266,7 +298,10 @@ func sendFile(o opts, path string, conns []*quic.Conn, enc *json.Encoder, dec *j
 		}
 		defer g.Close()
 		h := sha256.New()
-		io.Copy(h, g)
+		if _, err := io.Copy(h, abortReader{g, abort}); err != nil {
+			sum <- ""
+			return
+		}
 		sum <- hex.EncodeToString(h.Sum(nil))
 	}()
 
@@ -310,6 +345,7 @@ func sendFile(o opts, path string, conns []*quic.Conn, enc *json.Encoder, dec *j
 	stop()
 	sent := m.n.Load() - haveBytes
 	if first != nil {
+		close(abort)
 		return sent > 0, interrupted{first}
 	}
 	digest := <-sum
@@ -333,6 +369,23 @@ func sendFile(o opts, path string, conns []*quic.Conn, enc *json.Encoder, dec *j
 	}
 	o.rep.done("send", size, sent, el, fi.Name())
 	return true, nil
+}
+
+// abortReader：abort 关闭后再读就出错
+type abortReader struct {
+	r     io.Reader
+	abort <-chan struct{}
+}
+
+var errAborted = errors.New("不读了")
+
+func (a abortReader) Read(p []byte) (int, error) {
+	select {
+	case <-a.abort:
+		return 0, errAborted
+	default:
+	}
+	return a.r.Read(p)
 }
 
 func sendPiece(c *quic.Conn, f *os.File, p [2]uint64, m *meter) error {
@@ -484,6 +537,9 @@ func (f *inFile) save() {
 
 // saveLocked 原子地写下已收区间（先写临时文件再改名），进程在任何时候被杀都不会留下写了一半的记录
 func (f *inFile) saveLocked() {
+	if f.sealed.Load() { // 收齐了（改名后会删记录）或者取消了（半成品已删）：迟到的块别再把记录写回来
+		return
+	}
 	f.lastSave = time.Now()
 	b, _ := json.Marshal(partMeta{Name: f.name, Size: f.size, Ranges: f.ranges})
 	tmp := f.meta + ".tmp"
@@ -527,8 +583,25 @@ func lockFID(fid string) (unlock func()) {
 // recvSession 处理一个发送端。走中继时对方可能在后台打通直连、关掉中继会话，在直连上重开会话（upgrade.go）：
 // 那就在新的链接上接着收，同一个文件照常续传
 func recvSession(o opts, l *link) error {
+	o.x = newXfer("recv:"+o.friend, "recv", o.friend)
+	defer o.x.end()
 	for {
 		next, err := recvOne(o, l)
+		if isCanceled(err) {
+			if next != nil {
+				next.close()
+			}
+			return err
+		}
+		if o.x.canceled() {
+			if next != nil {
+				next.closeWith(codeCanceled, "canceled")
+			}
+			return canceledErr{}
+		}
+		if peerCanceled(err) {
+			return canceledErr{peer: true}
+		}
 		if next == nil {
 			return err
 		}
@@ -549,13 +622,17 @@ func recvOne(o opts, l *link) (next *link, err error) {
 			out.upgraded, out.upgradedVia = time.Since(t0), next.peer.String()
 		} else if err != nil {
 			out.err, out.reason = err.Error(), reasonOf(err)
+			if o.x.canceled() {
+				out.reason = rsnCanceled
+			}
 			l.pre.tracef("会话出错：%v", err)
 		}
 		l.pre.settle(out)
 	}()
 	defer l.close()
 	defer close(stop)
-	if err = serveLink(o, l); err != nil && l.relayed {
+	defer o.x.watch(l)()
+	if err = serveLink(o, l); err != nil && l.relayed && !o.x.canceled() && !peerCanceled(err) {
 		// 发送端是先接上直连、再关中继的，所以这边中继一断，直连多半已经在等着了；留几秒给最后的认证
 		select {
 		case next = <-up:
@@ -617,7 +694,7 @@ func serveLink(o opts, l *link) error {
 	}
 }
 
-func recvFile(o opts, l *link, offer ctlMsg, cur *atomic.Pointer[inFile], enc *json.Encoder, dec *json.Decoder) error {
+func recvFile(o opts, l *link, offer ctlMsg, cur *atomic.Pointer[inFile], enc *json.Encoder, dec *json.Decoder) (err error) {
 	name := filepath.Base(offer.Name) // 不信任对方给的路径
 	noteName("f", offer.Name)         // 不合法的名字也会进错误文字：先登记，诊断报告、上报里才能打码
 	if name == "." || name == ".." || name == "/" || strings.HasPrefix(name, ".p2pcp-") || len(offer.FID) != 32 || strings.Trim(offer.FID, "0123456789abcdef") != "" {
@@ -625,6 +702,12 @@ func recvFile(o opts, l *link, offer ctlMsg, cur *atomic.Pointer[inFile], enc *j
 		return fmt.Errorf("对方发来的文件名或指纹不合法：%q %q", offer.Name, offer.FID)
 	}
 	noteName("f", name)
+	if wasCanceled(offer.SID) { // 这次发送刚被本机取消过，对方没收到、当成中断重连过来了
+		enc.Encode(ctlMsg{T: "cancel"})
+		l.closeWith(codeCanceled, "canceled") // 光回 cancel 不够：紧接着关连接，没发出去的流数据会被丢掉
+		return canceledErr{}
+	}
+	o.x.setSID(offer.SID)
 	defer lockFID(offer.FID)()
 
 	if err := os.MkdirAll(o.out, 0o755); err != nil {
@@ -645,11 +728,30 @@ func recvFile(o opts, l *link, offer ctlMsg, cur *atomic.Pointer[inFile], enc *j
 			}
 		}
 	}
-	var err error
 	if f.f, err = os.OpenFile(f.part, os.O_RDWR|os.O_CREATE, 0o644); err != nil {
 		return err
 	}
 	defer f.f.Close()
+	defer func() { // 取消（哪一边都算）：半成品删掉，不留着续传（cancel.go）
+		if err == nil {
+			return
+		}
+		switch {
+		case o.x.canceled():
+			err = canceledErr{}
+		case peerCanceled(err) || peerCanceled(context.Cause(l.conn.Context())):
+			err = canceledErr{peer: true} // 下面几处错误是用 %v 拼的，原来的 ApplicationError 包不进去
+		}
+		if isCanceled(err) {
+			f.mu.Lock()          // 和 saveLocked 互斥：别让还在路上的块在删掉之后又把记录写回来
+			f.sealed.Store(true) // 还在写的块别再写
+			f.f.Close()
+			os.Remove(f.part)
+			os.Remove(f.meta)
+			f.mu.Unlock()
+			log.Printf("%s 已取消，删掉收了一半的文件", name)
+		}
+	}()
 	if f.ranges == nil {
 		if err := f.f.Truncate(int64(f.size)); err != nil {
 			return err

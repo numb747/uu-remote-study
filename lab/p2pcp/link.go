@@ -194,7 +194,10 @@ func (l *link) onClose(f func()) {
 }
 
 // close 先正常关掉所有连接（对方马上知道），再回收 Transport 和 socket
-func (l *link) close() {
+func (l *link) close() { l.closeWith(0, "") }
+
+// closeWith 同 close，但给对方一个应用错误码（取消用 codeCanceled，见 cancel.go）
+func (l *link) closeWith(code quic.ApplicationErrorCode, msg string) {
 	l.mu.Lock()
 	if l.closed {
 		l.mu.Unlock()
@@ -204,7 +207,7 @@ func (l *link) close() {
 	conns, cleanup := l.conns, l.cleanup
 	l.mu.Unlock()
 	for _, c := range conns {
-		c.CloseWithError(0, "")
+		c.CloseWithError(code, msg)
 	}
 	for i := len(cleanup) - 1; i >= 0; i-- {
 		cleanup[i]()

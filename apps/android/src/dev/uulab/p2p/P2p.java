@@ -64,8 +64,14 @@ final class P2p {
 
     /** 跑一条命令直到退出：stdout 的每一行交给 out，stderr（日志）交给 log。返回退出码。 */
     static int run(Context c, Lines out, Lines log, String... args) {
+        return run(c, out, log, null, args);
+    }
+
+    /** 同上；started 拿到进程（要往它的 stdin 写命令时用，比如 cancel） */
+    static int run(Context c, Lines out, Lines log, java.util.function.Consumer<Process> started, String... args) {
         try {
             Process p = start(c, args);
+            if (started != null) started.accept(p);
             Thread t = new Thread(() -> pump(p.getErrorStream(), log));
             t.start();
             pump(p.getInputStream(), out);
@@ -75,6 +81,20 @@ final class P2p {
         } catch (Exception e) {
             out.line("@ERROR " + e.getMessage());
             return -1;
+        }
+    }
+
+    /**
+     * 往 p2pcp 的 stdin 写一行命令（lab/p2pcp/cancel.go 的 readCommands）：cancel、cancel recv。
+     * p2pcp 带 -progress 时才读 stdin；进程已经退出就算了。
+     */
+    static void command(Process p, String line) {
+        if (p == null) return;
+        try {
+            java.io.OutputStream os = p.getOutputStream();
+            os.write((line + "\n").getBytes(java.nio.charset.StandardCharsets.UTF_8));
+            os.flush();
+        } catch (Exception ignored) {
         }
     }
 

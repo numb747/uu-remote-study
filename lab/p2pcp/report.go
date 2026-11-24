@@ -1,6 +1,7 @@
 package main
 
 import (
+	"errors"
 	"fmt"
 	"log"
 	"os/exec"
@@ -16,6 +17,7 @@ import (
 //	@DONE <方向> <字节> <秒> <平均 Mbps> <路径或文件名>
 //	@REASON <原因码> <人话>。<动作>     紧跟着一行 @ERROR（reason.go；旧版 App 不认识，忽略）
 //	@ERROR <文字>
+//	@CANCELED <me|peer> <文字>          本机 / 对方取消了（cancel.go），不是失败（旧版 App 不认识，忽略）
 type reporter struct {
 	machine bool
 	notify  bool
@@ -72,6 +74,20 @@ func (r *reporter) done(dir string, size, sent uint64, el time.Duration, path st
 }
 
 func (r *reporter) fail(err error) {
+	var ce canceledErr
+	if errors.As(err, &ce) {
+		who := "me"
+		if ce.peer {
+			who = "peer"
+		}
+		log.Print(err)
+		r.line("@CANCELED %s %s", who, strings.ReplaceAll(err.Error(), "\n", " "))
+		r.desktop("P2P 直传："+ce.Error(), err.Error(), -1)
+		r.mu.Lock()
+		r.nid = ""
+		r.mu.Unlock()
+		return
+	}
 	code := reasonOf(err)
 	if code == "" {
 		code = rsnUnknown

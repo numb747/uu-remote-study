@@ -204,6 +204,7 @@ func (a *app) routes() http.Handler {
 	mux.HandleFunc("POST /api/invite", a.invite)
 	mux.HandleFunc("POST /api/join", a.join)
 	mux.HandleFunc("POST /api/send", a.send)
+	mux.HandleFunc("POST /api/cancel", a.cancel)
 	mux.HandleFunc("POST /api/me", a.rename)
 	mux.HandleFunc("POST /api/friend", a.friend)
 	mux.HandleFunc("POST /api/upload", a.upload)
@@ -445,14 +446,35 @@ func (a *app) send(w http.ResponseWriter, r *http.Request) {
 	}
 	ch := fmt.Sprintf("send:%d", a.sends.Add(1))
 	o.rep = &reporter{notify: a.o.rep.notify, sink: a.h.pub(ch)}
+	o.x = newXfer(ch, "send", o.friend) // 网页上的「取消」按发送号找它（cancel.go）
 	o.rep.line("@TO %s", o.friend)
 	go func() {
 		defer cleanup()
+		defer o.x.end()
 		if err := send(o, paths); err != nil {
 			o.rep.fail(err)
 		}
+		o.rep.line("@END") // 这次发送结束了（成功、失败、取消都有）：网页收起「取消」按钮
 	}()
 	writeJSONResp(w, map[string]string{"ch": ch, "friend": o.friend})
+}
+
+// cancel：{"ch":"send:N"} 取消这次发送；{"ch":"recv"} 取消正在收的（所有好友的）
+func (a *app) cancel(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		Ch string `json:"ch"`
+	}
+	if err := readBody(r, &req); err != nil {
+		httpFail(w, err)
+		return
+	}
+	n := cancelXfers(func(x *xfer) bool {
+		if req.Ch == "recv" {
+			return x.dir == "recv"
+		}
+		return x.dir == "send" && x.id == req.Ch
+	})
+	writeJSONResp(w, map[string]int{"n": n})
 }
 
 func (a *app) rename(w http.ResponseWriter, r *http.Request) {
