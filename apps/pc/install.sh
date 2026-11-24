@@ -44,7 +44,7 @@ After=graphical-session.target
 
 [Service]
 ExecStart=%h/.local/bin/p2p-direct app -no-browser
-Restart=always
+Restart=on-failure
 RestartSec=3
 
 [Install]

@@ -142,7 +142,7 @@ func main() {
 	role := os.Args[1]
 	switch role {
 	case "send", "recv", "daemon", "check", "expose", "forward", "serve", "id", "invite", "join", "contacts", "report", "app",
-		"sendto", "launch", "uninstall":
+		"sendto", "launch", "uninstall", "window":
 	default:
 		usage()
 	}
@@ -210,14 +210,14 @@ func main() {
 	}
 	// 不碰网络的命令、会合地址另有来处的命令（join 听邀请码的，send -to 听好友记录的，serve 每个好友各有地址）不要求 -server
 	needServer := !(role == "id" || role == "contacts" || role == "join" || role == "serve" || role == "report" || role == "app" ||
-		role == "sendto" || role == "launch" || role == "uninstall" || o.friend != "")
+		role == "sendto" || role == "launch" || role == "uninstall" || role == "window" || o.friend != "")
 	if o.server == "" && needServer {
 		log.Fatal("没有会合服务器：用 -server IP:7001 指定，或者写进 ~/.config/p2pcp/server（也认环境变量 P2PCP_SERVER）。" +
 			"在一台有公网 IP 的机器上跑 punch server -listen :7001 -relay :3478，放行 UDP 7001 和 3478")
 	}
 	o.rep = &reporter{machine: *progress, notify: *notify}
 	o.regEvery = 500 * time.Millisecond
-	if role != "id" && role != "contacts" && role != "sendto" && os.Getenv("P2PCP_NO_LOG") == "" {
+	if role != "id" && role != "contacts" && role != "sendto" && role != "window" && os.Getenv("P2PCP_NO_LOG") == "" {
 		setupLog(role) // 日志落盘（diag.go），诊断报告要用
 	}
 	setupCrash(o.rep)
@@ -277,6 +277,11 @@ func main() {
 		err = cmdUninstall(o)
 	case "sendto":
 		err = cmdSendto(o, fs.Args())
+	case "window":
+		if fs.NArg() != 1 {
+			log.Fatal("用法：p2pcp window <地址>")
+		}
+		err = cmdWindow(fs.Arg(0))
 	case "recv":
 		err = recv(o)
 	case "check":

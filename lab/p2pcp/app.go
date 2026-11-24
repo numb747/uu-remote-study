@@ -153,7 +153,7 @@ func cmdApp(o opts, noBrowser bool) error {
 	if a, ok := runningApp(cfg); ok {
 		log.Printf("P2P 直传已经在运行（pid %d），打开 %s", a.PID, strings.SplitN(a.url(), "?", 2)[0])
 		if !noBrowser {
-			openBrowser(a.url())
+			openUI(a.url())
 		}
 		return nil
 	}
@@ -181,7 +181,7 @@ func cmdApp(o opts, noBrowser bool) error {
 	srv := &http.Server{Handler: a.routes(), ReadHeaderTimeout: 10 * time.Second}
 	log.Printf("P2P 直传桌面版：http://127.0.0.1:%d/（只有本机能打开）", info.Port)
 	if !noBrowser {
-		openBrowser(info.url())
+		openUI(info.url())
 	}
 	return srv.Serve(ln)
 }
@@ -223,6 +223,7 @@ func (a *app) routes() http.Handler {
 	mux.HandleFunc("POST /api/pick", a.pick)
 	mux.HandleFunc("POST /api/unpick", a.unpick)
 	mux.HandleFunc("POST /api/quit", a.quit)
+	mux.HandleFunc("POST /api/autostart", a.autostart)
 	mux.HandleFunc("POST /api/me", a.rename)
 	mux.HandleFunc("POST /api/friend", a.friend)
 	mux.HandleFunc("POST /api/upload", a.upload)
@@ -327,7 +328,7 @@ func (a *app) state(w http.ResponseWriter, r *http.Request) {
 		"me":      map[string]string{"name": id.Name, "id": deviceID(id.pub())},
 		"friends": fs, "invites": len(liveInvites(b.Invites)),
 		"upload": loadSettings(a.cfg).uploadOn(), "version": version, "out": a.o.out,
-		"events": recent, "picks": a.livePicks(), "os": runtime.GOOS,
+		"events": recent, "picks": a.livePicks(), "os": runtime.GOOS, "autostart": autostartJSON(),
 	})
 }
 
@@ -582,7 +583,30 @@ func (a *app) livePicks() []*pick {
 	return out
 }
 
-// quit：让这个 app 退出（Windows 安装新版、卸载时要先停掉旧的，desktop_windows.go）
+// autostartJSON：开机自启开没开；这个系统 / 这种装法不支持时是 null，网页就不显示开关
+func autostartJSON() any {
+	on, ok := autostartState()
+	if !ok {
+		return nil
+	}
+	return on
+}
+
+func (a *app) autostart(w http.ResponseWriter, r *http.Request) {
+	var req struct{ On bool }
+	if err := readBody(r, &req); err != nil {
+		httpFail(w, err)
+		return
+	}
+	if err := setAutostart(req.On); err != nil {
+		httpFail(w, withReason(rsnLocal, err))
+		return
+	}
+	writeJSONResp(w, map[string]any{"autostart": autostartJSON()})
+}
+
+// quit：让这个 app 退出：网页上的「退出」，Windows 安装新版、卸载时先停掉旧的（desktop_windows.go）。
+// Linux 的 systemd 单元是 Restart=on-failure，正常退出不会被拉起来
 func (a *app) quit(w http.ResponseWriter, r *http.Request) {
 	writeJSONResp(w, map[string]bool{"ok": true})
 	log.Print("收到退出请求")

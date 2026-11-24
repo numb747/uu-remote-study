@@ -99,7 +99,20 @@
     <div class="dim">每次连接结束后把结果（两边的网络类型和公网 IP、有没有直连、用了多久、失败原因）发给会合服务器，用来改进打洞；不含文件名、好友名和任何密钥。</div>
   </div>
 
+  <div class="card">
+    <h2>设置</h2>
+    <div id="autoRow" hidden>开机自动启动：<span id="autostart" class="link">…</span>
+      <div class="dim">开着时，开机后在后台接收好友发来的文件，不用打开这个界面。</div></div>
+    <div style="margin-top:10px"><span id="quitBtn" class="link" style="color:var(--red)">退出 P2P 直传</span>
+      <span class="dim">　关掉<span id="winWord">这个页面</span>只是关界面，后台照样收文件；退出后就收不到了</span></div>
+  </div>
+
   <div class="card"><h2>日志</h2><div id="log"></div></div>
+
+<div class="modal" id="byeDlg"><div class="box">
+  <h2 style="color:var(--fg);font-size:18px;margin:0 0 8px">P2P 直传已退出</h2>
+  <div class="dim" id="byeText">好友发来的文件现在收不到了。下次用时从开始菜单打开「P2P 直传」。</div>
+</div></div>
 </main>
 
 <div class="modal" id="inviteDlg"><div class="box">
@@ -147,6 +160,9 @@ async function refresh() {
   $('out').textContent = state.out + (state.os === 'windows' ? '\\' : '/') + '好友名';
   $('upload').textContent = state.upload ? '开（点这里关掉）' : '关（点这里打开）';
   $('fwHint').hidden = !(state.os === 'windows' && !localStorage.fwOk);
+  $('autoRow').hidden = state.autostart === null;
+  if (window.chrome && chrome.webview) $('winWord').textContent = '窗口';
+  if (state.autostart !== null) $('autostart').textContent = state.autostart ? '开（点这里关掉）' : '关（点这里打开）';
   const pk = state.picks.length ? state.picks[state.picks.length - 1] : null; // 右键交过来的，最新的那批
   $('pickCard').hidden = !pk;
   if (pk) {
@@ -370,6 +386,16 @@ $('joinGo').onclick = async () => {
 };
 document.querySelectorAll('[data-close]').forEach(b => b.onclick = () => b.closest('.modal').classList.remove('on'));
 
+$('autostart').onclick = async () => { try { await post('/api/autostart', { on: !state.autostart }); refresh(); } catch (e) { alert(errText(e)); } };
+$('quitBtn').onclick = async () => {
+  const busy = curSend || $('recvCancel').classList.contains('on');
+  if (!confirm((busy ? '正在传文件，退出会中断（下次对方重发时接着传）。\n\n' : '') + '退出 P2P 直传？退出后好友发来的文件收不到，下次从开始菜单打开。')) return;
+  try { await post('/api/quit'); } catch (e) { return alert(errText(e)); }
+  if (state.os !== 'windows') $('byeText').textContent = '好友发来的文件现在收不到了。下次用时从启动器打开「P2P 直传」，或者运行 p2p-direct app。';
+  $('byeDlg').classList.add('on');
+  // WebView2 窗口里：窗口跟着关（window_windows.go）；浏览器里关不了标签页，留着这句话
+  if (window.chrome && chrome.webview) setTimeout(() => chrome.webview.postMessage('close'), 1500);
+};
 $('upload').onclick = async () => { try { await post('/api/upload', { on: !state.upload }); refresh(); } catch (e) { alert(errText(e)); } };
 $('reportBtn').onclick = async () => {
   $('reportOut').textContent = '正在生成（要现测一次网络，十几秒）……';

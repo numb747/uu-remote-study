@@ -50,7 +50,7 @@ func cmdSendto(o opts, files []string) error {
 	if err := a.post("/api/pick", map[string]any{"paths": paths}, &resp); err != nil {
 		return err
 	}
-	openBrowser(a.url())
+	openUI(a.url())
 	return nil
 }
 
