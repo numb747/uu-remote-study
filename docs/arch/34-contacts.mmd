@@ -2,8 +2,8 @@ flowchart LR
   me["我和朋友"]
   subgraph clients["客户端（薄壳，启动 p2pcp、读 -progress 的 @ 行）"]
     android["安卓 App 通讯录模式：好友列表、邀请二维码、粘贴 / 链接加好友、选人发送；前台服务常驻 serve -reg 20s，熄屏要系统放行后台<br/>MainActivity / P2PService"]
-    webui["桌面版 p2pcp app：127.0.0.1 本地网页（HTML 内嵌），通讯录 / 加好友 / 拖文件发送 / 记录 / 诊断 / 取消；同进程跑 serve，@ 行经 SSE 推给网页；令牌 cookie + Host + Origin 校验，单实例；右键交来的文件（/api/pick）在网页上选好友、从原处发<br/>app.go / app.html"]:::changed
-    win["Windows 集成：双击 P2P直传.exe 自装到 %LOCALAPPDATA%\Programs、开机自启 / 开始菜单 /「发送到」快捷方式、登记卸载；toast 通知（PowerShell）；新版覆盖前先 /api/quit。「发送到」跑 p2pcp sendto：路径交给正在跑的 app（没在跑就拉起来），再打开网页<br/>desktop_windows.go / sendto.go"]:::changed
+    webui["桌面版 p2pcp app：127.0.0.1 本地网页（HTML 内嵌），通讯录 / 加好友 / 拖文件发送 / 记录 / 诊断 / 取消 / 退出 / 开机自启开关；同进程跑 serve，@ 行经 SSE 推给网页；令牌 cookie + Host + Origin 校验，单实例；右键交来的文件（/api/pick）在网页上选好友、从原处发<br/>app.go / app.html"]:::changed
+    win["Windows 集成：双击 P2P直传.exe 自装到 %LOCALAPPDATA%\Programs、开机自启 / 开始菜单 /「发送到」快捷方式、登记卸载；界面装进 WebView2 窗口（单独进程，失败退回浏览器）；toast 通知（PowerShell）；新版覆盖前先 /api/quit。「发送到」跑 p2pcp sendto：路径交给正在跑的 app（没在跑就拉起来），再打开网页<br/>desktop_windows.go / window_windows.go / sendto.go"]:::changed
     linux["Linux 集成：systemd 用户服务、启动器、Dolphin 右键（zenity 选好友）、notify-send<br/>apps/pc/install.sh、p2p-direct"]
     mac["macOS 集成：LaunchAgent、osascript 通知、zip 包"]:::planned
   end
